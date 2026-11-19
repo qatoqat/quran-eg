@@ -2,7 +2,7 @@
 
 A native reader for the 15-line Madani mushaf, written in Rust with
 [egui](https://github.com/emilk/egui). It is a port of
-[quran-dx](../quran-dx) (Dioxus + webview) without the webview: one small
+[quran-dx](https://github.com/qatoqat/quran-dx) (Dioxus + webview) without the webview: one small
 binary that draws everything itself.
 
 Data comes from the public [Quran.com API v4](https://api-docs.quran.com)
