@@ -75,6 +75,36 @@ menu entry and an icon. Run it again after changes (`--rebuild` / `-f` matters: 
 version doesn't change, so the last package file would be reused otherwise);
 `pacman -R quran-eg` removes it.
 
+## Web
+
+The same app runs in a browser (WebAssembly, WebGL): <https://qatoqat.com/quran-eg/>.
+
+```bash
+cargo install wasm-bindgen-cli --locked --version "$(scripts/build-web.sh --bindgen-version)"
+scripts/build-web.sh               # dist/, to be served from the root of a site
+scripts/build-web.sh /quran-eg/    # ... or under a base path, as on GitHub Pages
+```
+
+The script builds the `web` profile for `wasm32-unknown-unknown`, runs
+`wasm-bindgen` (which must be the very version in `Cargo.lock`) and puts the page,
+the wasm and a font in `dist/`. `dist/404.html` is a copy of the page: a static
+host that serves it for unknown paths makes every address of the app loadable.
+A push to `main` builds and deploys the site (`.github/workflows/pages.yml`).
+
+What differs from the native app:
+
+- **The address is the location**, as in quran-dx: the path is the view (`/`,
+  `/juz`, `/2`, `/2/255`, `/juz/30`, `/page/3`, `/search?q=…`), the hash the reading
+  position (`/2#2:142`). Going somewhere adds a history entry, scrolling updates the
+  current one, back and forward work, and the tab is named after the view.
+- **No threads**: what the native app gives to worker threads (drawing a page's
+  sprite sheet, shaping) runs between frames, a few milliseconds at a time; requests
+  use the browser's `fetch`.
+- **Settings** are kept in the browser's `localStorage`; fonts are cached by the
+  browser, not by the app. A font source that is a path is a path on the site.
+- **Letters the built-in font lacks** (ḥ, ṣ, ʿ) come from Noto Sans, a file of the
+  site (`app/web/fonts/`, SIL Open Font License), where the native app asks the system.
+
 ## Tests
 
 ```bash
@@ -164,6 +194,8 @@ crates/quran-core/   everything without a GUI: API client, verse references, vie
 crates/qcf-glyphs/   rasteriser for the QCF page fonts (V2 mono, V4 tajweed)
 app/src/             the egui app: reader (layout, scrolling, drawing), header,
                      lists, search, settings panel, pointer, fonts, sprite sheets
+app/web/             the web build's page and font
+scripts/             build-web.sh
 packaging/           Arch Linux package, desktop entry and icon
 ```
 

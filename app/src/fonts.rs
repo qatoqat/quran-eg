@@ -1,23 +1,20 @@
 //! Font files: fetched at runtime (disk cache first, then each font base in
 //! order), parsed off the UI thread, and dropped again when their page is far
 //! from the viewport. A page whose font is not there is drawn as text.
+//!
+//! In a browser there is no disk cache here — the browser's own HTTP cache does
+//! that — and a font base that is a path is a path on the site.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::time::Duration;
 
-use quran_core::fonts::{FALLBACK_PATH, FontSet, cache_name, join};
-use quran_core::http::Http;
-use quran_core::settings::storage::{APP_DIR, write_atomic};
+use quran_core::fonts::{FALLBACK_PATH, FontSet, join};
 
 use crate::arabic::{ArabicFont, Ornaments};
 use crate::glyphs::{PageGlyphs, parse_page_font};
 use crate::task;
-
-/// Largest font file accepted (the biggest page font is well under 1 MB).
-const MAX_FONT_BYTES: u64 = 8 * 1024 * 1024;
 
 pub enum Status<T: ?Sized> {
     Loading,
@@ -61,9 +58,12 @@ pub struct FontStore {
 }
 
 impl FontStore {
-    /// The user's font cache: `<cache dir>/quran-eg/fonts`.
+    /// The user's font cache: `<cache dir>/quran-eg/fonts` (none in a browser).
     pub fn user_cache() -> Option<PathBuf> {
-        dirs::cache_dir().map(|d| d.join(APP_DIR).join("fonts"))
+        #[cfg(not(target_arch = "wasm32"))]
+        return dirs::cache_dir().map(|d| d.join(quran_core::settings::storage::APP_DIR).join("fonts"));
+        #[cfg(target_arch = "wasm32")]
+        None
     }
 
     /// Fonts from `bases`, tried in order, kept in `cache_dir` once fetched.
@@ -116,13 +116,17 @@ impl FontStore {
     /// them otherwise. Until then (or if they can't be had) banners are plain.
     pub fn ornaments(&mut self) -> Option<Arc<Ornaments>> {
         let entry = self.ornaments.get_or_insert_with(|| {
-            let cache_dir = self.cache_dir.clone();
-            // Without a cache directory nothing may be fetched either (tests).
-            let bases: Vec<String> = cache_dir.iter().map(|_| ORNAMENT_BASE.to_string()).collect();
-            task::spawn(task::Pool::Net, &self.ctx, &self.tx, move || {
-                let font = |path: &str| load(&bases, cache_dir.as_deref(), path, ArabicFont::from_bytes);
-                let both = || Ornaments::verified(font(ORNAMENT_FRAME)?, font(ORNAMENT_NAMES)?).map(Arc::new);
-                Loaded::Ornaments(task::guarded(both, died))
+            // (Tests have no font source at all, and must not fetch these either.)
+            let bases = if self.bases.is_empty() { Vec::new() } else { vec![ORNAMENT_BASE.to_string()] };
+            let source = Source { ctx: self.ctx.clone(), bases: Arc::new(bases), cache_dir: self.cache_dir.clone() };
+            let (tx, names_source) = (self.tx.clone(), source.clone());
+            // The frame, then the names, then: do they draw the banner?
+            load(source, ORNAMENT_FRAME.into(), ArabicFont::from_bytes, move |frame| match frame {
+                Err(e) => drop(tx.send(Loaded::Ornaments(Err(e)))),
+                Ok(frame) => load(names_source, ORNAMENT_NAMES.into(), ArabicFont::from_bytes, move |names| {
+                    let both = names.and_then(|names| task::guarded(|| Ornaments::verified(frame, names).map(Arc::new), died));
+                    let _ = tx.send(Loaded::Ornaments(both));
+                }),
             });
             Status::Loading
         });
@@ -135,10 +139,10 @@ impl FontStore {
     /// The font of a page, if it is loaded; starts loading it otherwise.
     pub fn page(&mut self, set: FontSet, page: u16) -> Option<Arc<dyn PageGlyphs>> {
         let entry = self.pages.entry((set, page)).or_insert_with(|| {
-            let (bases, cache_dir, epoch) = (self.bases.clone(), self.cache_dir.clone(), self.epoch);
-            task::spawn(task::Pool::Net, &self.ctx, &self.tx, move || {
-                let font = task::guarded(|| load(&bases, cache_dir.as_deref(), &set.path(page), parse_page_font), died);
-                Loaded::Page(epoch, set, page, font)
+            let (tx, epoch) = (self.tx.clone(), self.epoch);
+            let source = Source { ctx: self.ctx.clone(), bases: self.bases.clone(), cache_dir: self.cache_dir.clone() };
+            load(source, set.path(page), parse_page_font, move |font| {
+                let _ = tx.send(Loaded::Page(epoch, set, page, font));
             });
             Status::Loading
         });
@@ -156,11 +160,10 @@ impl FontStore {
     /// The font for text-mode words and Arabic labels, if it is loaded.
     pub fn fallback(&mut self) -> Option<Arc<ArabicFont>> {
         let entry = self.fallback.get_or_insert_with(|| {
-            let (bases, cache_dir, epoch) = (self.bases.clone(), self.cache_dir.clone(), self.epoch);
-            task::spawn(task::Pool::Net, &self.ctx, &self.tx, move || {
-                let parse = |bytes: &[u8]| ArabicFont::from_bytes(bytes).map(Arc::new);
-                let font = task::guarded(|| load(&bases, cache_dir.as_deref(), FALLBACK_PATH, parse), died);
-                Loaded::Fallback(epoch, font)
+            let (tx, epoch) = (self.tx.clone(), self.epoch);
+            let source = Source { ctx: self.ctx.clone(), bases: self.bases.clone(), cache_dir: self.cache_dir.clone() };
+            load(source, FALLBACK_PATH.into(), |bytes| ArabicFont::from_bytes(bytes).map(Arc::new), move |font| {
+                let _ = tx.send(Loaded::Fallback(epoch, font));
             });
             Status::Loading
         });
@@ -221,63 +224,94 @@ fn died<T>() -> Result<T, String> {
     Err("the font file could not be read (internal error)".into())
 }
 
-fn http() -> &'static Http {
-    static HTTP: std::sync::OnceLock<Http> = std::sync::OnceLock::new();
-    HTTP.get_or_init(|| Http::new(Duration::from_secs(10), Duration::from_secs(30)))
+/// Where fonts are looked for.
+#[derive(Clone)]
+struct Source {
+    ctx: egui::Context,
+    bases: Arc<Vec<String>>,
+    /// (Unused in a browser, whose HTTP cache does this.)
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    cache_dir: Option<PathBuf>,
 }
 
-fn fetch(base: &str, path: &str) -> Result<Vec<u8>, String> {
-    let location = join(base, path);
-    if !base.contains("://") {
-        // A local copy of quran.com's `fonts/quran` folder.
-        return std::fs::read(&location).map_err(|e| format!("{location}: {e}"));
-    }
-    match http().get(&location, "*/*") {
-        Ok((200..=299, bytes)) if bytes.len() as u64 <= MAX_FONT_BYTES => Ok(bytes),
-        Ok((200..=299, _)) => Err(format!("{location}: too large to be a font")),
-        Ok((status, _)) => Err(format!("{location}: HTTP {status}")),
-        Err(e) => Err(format!("{location}: {e}")),
-    }
-}
+/// Largest font file accepted (the biggest page font is well under 1 MB).
+const MAX_FONT_BYTES: usize = 8 * 1024 * 1024;
 
-/// The font at `path`: from the cache, else from the first base that has a
-/// file `parse` accepts (which is then cached). A cached file that no longer
-/// parses is thrown away and fetched again.
-fn load<T>(
-    bases: &[String],
-    cache_dir: Option<&Path>,
-    path: &str,
-    parse: impl Fn(&[u8]) -> Result<T, String>,
-) -> Result<T, String> {
-    let cached = cache_dir.map(|dir| dir.join(cache_name(path)));
-    if let Some(file) = &cached
-        && let Ok(bytes) = std::fs::read(file)
+/// Get the font at `path` and hand it to `done`: from the cache, else from the
+/// first base that has a file `parse` accepts (which is then cached). A cached
+/// file that no longer parses is thrown away and fetched again.
+fn load<T: Send + 'static>(
+    source: Source,
+    path: String,
+    parse: fn(&[u8]) -> Result<T, String>,
+    done: impl FnOnce(Result<T, String>) + Send + 'static,
+) {
+    #[cfg(not(target_arch = "wasm32"))]
     {
-        match parse(&bytes) {
-            Ok(font) => return Ok(font),
-            Err(_) => {
-                let _ = std::fs::remove_file(file);
-            }
-        }
-    }
-    let mut last = String::from("no font source is configured");
-    for base in bases {
-        match fetch(base, path).and_then(|bytes| parse(&bytes).map(|font| (font, bytes))) {
-            Ok((font, bytes)) => {
-                if let Some(file) = &cached {
-                    let _ = write_atomic(file, &bytes);
+        // Reading and parsing the cached file is work for a network thread, not for a frame.
+        let ctx = source.ctx.clone();
+        task::detach(task::Pool::Net, &ctx, move || {
+            if let Some(file) = source.cache_dir.as_ref().map(|dir| dir.join(quran_core::fonts::cache_name(&path)))
+                && let Ok(bytes) = std::fs::read(&file)
+            {
+                match task::guarded(|| parse(&bytes), died) {
+                    Ok(font) => return done(Ok(font)),
+                    Err(_) => drop(std::fs::remove_file(&file)),
                 }
-                return Ok(font);
             }
-            Err(e) => last = e,
-        }
+            from_base(source, 0, path, parse, done, "no font source is configured".into());
+        });
     }
-    Err(last)
+    #[cfg(target_arch = "wasm32")]
+    from_base(source, 0, path, parse, done, "no font source is configured".into());
+}
+
+/// Try base `index`, and the next one if it has no usable file.
+fn from_base<T: Send + 'static>(
+    source: Source,
+    index: usize,
+    path: String,
+    parse: fn(&[u8]) -> Result<T, String>,
+    done: impl FnOnce(Result<T, String>) + Send + 'static,
+    last_error: String,
+) {
+    let Some(base) = source.bases.get(index).cloned() else { return done(Err(last_error)) };
+    let location = join(&base, &path);
+    let ctx = source.ctx.clone();
+    let named = location.clone();
+    let take = move |fetched: Result<Vec<u8>, String>| {
+        let parsed = fetched.and_then(|bytes| task::guarded(|| parse(&bytes), died).map(|font| (font, bytes)));
+        match parsed {
+            Ok((font, _bytes)) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                if let Some(dir) = &source.cache_dir {
+                    let _ = quran_core::settings::storage::write_atomic(&dir.join(quran_core::fonts::cache_name(&path)), &_bytes);
+                }
+                done(Ok(font));
+            }
+            Err(e) => from_base(source, index + 1, path, parse, done, format!("{named}: {e}")),
+        }
+    };
+    // A base that is a path: a local copy of quran.com's `fonts/quran` folder
+    // (in a browser, a path on the site, which is fetched like any other).
+    #[cfg(not(target_arch = "wasm32"))]
+    if !base.contains("://") {
+        return take(std::fs::read(&location).map_err(|e| e.to_string()));
+    }
+    crate::net::get(&ctx, location, "*/*", move |fetched| {
+        take(match fetched {
+            Ok((200..=299, bytes)) if bytes.len() <= MAX_FONT_BYTES => Ok(bytes),
+            Ok((200..=299, _)) => Err("too large to be a font".into()),
+            Ok((status, _)) => Err(format!("HTTP {status}")),
+            Err(e) => Err(e),
+        })
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quran_core::fonts::cache_name;
 
     fn scratch(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("quran-eg-fonts-{name}-{}", std::process::id()));
@@ -291,6 +325,14 @@ mod tests {
         if text.starts_with("font") { Ok(text) } else { Err(format!("not a font: {text}")) }
     }
 
+    /// Load `path` and wait for the answer.
+    fn fetch(bases: &[String], cache: Option<&PathBuf>, path: &str) -> Result<String, String> {
+        let source = Source { ctx: egui::Context::default(), bases: Arc::new(bases.to_vec()), cache_dir: cache.cloned() };
+        let (tx, rx) = channel();
+        load(source, path.into(), parse, move |font| drop(tx.send(font)));
+        rx.recv_timeout(std::time::Duration::from_secs(10)).expect("the font job answers")
+    }
+
     #[test]
     fn bases_are_tried_in_order_and_the_result_is_cached() {
         let dir = scratch("order");
@@ -302,16 +344,16 @@ mod tests {
         std::fs::write(second.join("hafs/p1.woff2"), "font one").unwrap();
         let bases = [first.display().to_string(), second.display().to_string()];
 
-        assert_eq!(load(&bases, Some(&cache), "hafs/p1.woff2", parse).as_deref(), Ok("font one"));
+        assert_eq!(fetch(&bases, Some(&cache), "hafs/p1.woff2").as_deref(), Ok("font one"));
         let cached = cache.join(cache_name("hafs/p1.woff2"));
         assert_eq!(std::fs::read_to_string(&cached).unwrap(), "font one");
 
         // From now on the cache answers, even with no base reachable.
-        assert_eq!(load(&[], Some(&cache), "hafs/p1.woff2", parse).as_deref(), Ok("font one"));
+        assert_eq!(fetch(&[], Some(&cache), "hafs/p1.woff2").as_deref(), Ok("font one"));
 
         // A cached file that no longer parses is replaced.
         std::fs::write(&cached, "rubbish").unwrap();
-        assert_eq!(load(&bases, Some(&cache), "hafs/p1.woff2", parse).as_deref(), Ok("font one"));
+        assert_eq!(fetch(&bases, Some(&cache), "hafs/p1.woff2").as_deref(), Ok("font one"));
         assert_eq!(std::fs::read_to_string(&cached).unwrap(), "font one");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -321,10 +363,10 @@ mod tests {
         let dir = scratch("fail");
         let cache = dir.join("cache");
         let bases = [dir.join("nowhere").display().to_string()];
-        let err = load(&bases, Some(&cache), "hafs/p9.woff2", parse).unwrap_err();
+        let err = fetch(&bases, Some(&cache), "hafs/p9.woff2").unwrap_err();
         assert!(err.contains("nowhere/hafs/p9.woff2"), "{err}");
         assert!(!cache.join(cache_name("hafs/p9.woff2")).exists());
-        assert!(load(&[], None, "x", parse).unwrap_err().contains("no font source"));
+        assert!(fetch(&[], None, "x").unwrap_err().contains("no font source"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

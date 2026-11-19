@@ -2,6 +2,8 @@
 
 use std::sync::mpsc::Receiver;
 
+use quran_core::api::Call;
+
 use crate::task::{self, Poll};
 
 /// After a failed request for something the app needs in the background
@@ -47,10 +49,11 @@ impl<T: Send + 'static> Remote<T> {
         self.error.is_some() && self.job.is_none() && now - self.failed_at >= RETRY_AFTER
     }
 
-    pub fn load(&mut self, ctx: &egui::Context, fetch: impl FnOnce() -> Result<Vec<T>, String> + Send + 'static) {
+    /// Ask for the list (unless it is there or on its way); `tidy` puts the answer in order.
+    pub fn load(&mut self, ctx: &egui::Context, call: Call<Vec<T>>, tidy: fn(Vec<T>) -> Vec<T>) {
         if self.items.is_empty() && self.job.is_none() {
             // (The error stays on screen until the new attempt has an answer.)
-            self.job = Some(task::run(task::Pool::Net, ctx, fetch));
+            self.job = Some(crate::net::call(ctx, call, move |answer| answer.map(tidy).map_err(|e| e.to_string())));
         }
     }
 }

@@ -119,7 +119,7 @@ fn build_sheet(block: &PageBlock, font: &Arc<dyn PageGlyphs>, shared: &Shared<'_
         px_per_em,
         palette: Palette::Light,
     };
-    sheet::build(&job)
+    sheet::build(job)
 }
 
 fn place_page(block: &PageBlock, sheet: &Sheet, m: &Metrics, shared: &Shared<'_>) -> Placed {

@@ -1,0 +1,54 @@
+name: Deploy to GitHub Pages
+
+# A push to main (or a manual run) tests the workspace, builds the web app and
+# publishes it. The site lives under /<repository name>/, so the build gets that
+# as its base path; 404.html is a copy of the page, which makes reloads and
+# shared links to any view (/2, /juz/30#78:1, ...) open the app.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Libraries of the native build (the tests build it)
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+      - name: Fonts for the glyph tests
+        run: sh crates/qcf-glyphs/tests/fixtures/fetch.sh
+      - run: cargo test --workspace --locked
+      - uses: cargo-bins/cargo-binstall@main
+      - name: wasm-bindgen, the version in Cargo.lock
+        run: cargo binstall --no-confirm "wasm-bindgen-cli@$(scripts/build-web.sh --bindgen-version)"
+      - name: Build the web app
+        run: scripts/build-web.sh "/${{ github.event.repository.name }}/"
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

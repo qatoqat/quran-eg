@@ -29,11 +29,9 @@ const PER_PAGE: u32 = 20;
 type Found = (String, u32, Result<api::Search, String>);
 
 fn ask(ctx: &egui::Context, client: &Client, query: &str, size: u32, page: u32) -> Receiver<Found> {
-    let (client, query) = (client.clone(), query.trim().to_string());
-    task::run(Pool::Net, ctx, move || {
-        let found = client.search(&query, size, page, LANGUAGE).map_err(|e| describe_error(&e));
-        (query, page, found)
-    })
+    let query = query.trim().to_string();
+    let call = client.search_call(&query, size, page, LANGUAGE);
+    crate::net::call(ctx, call, move |answer| (query, page, answer.map_err(|e| describe_error(&e))))
 }
 
 /// The Arabic text of a list of verses, word by word, in one texture.
@@ -80,7 +78,7 @@ impl WordSheet {
             .collect();
         self.job = Some(task::run(Pool::Draw, ui.ctx(), move || {
             let job = sheet::Job { requests, fonts: Vec::new(), fallback: Some(font), ornaments: None, px_per_em: size * ppp, palette: Palette::Light };
-            let sheet = sheet::build(&job);
+            let sheet = sheet::build(job);
             (ColorImage::from_rgba_premultiplied([sheet.width, sheet.height], &sheet.rgba), sheet.sprites)
         }));
     }
@@ -412,6 +410,10 @@ impl SearchBox {
         if go.is_some() {
             self.dropdown = false;
             self.active = None;
+        }
+        // A jump is done with: the box starts empty next time. (A search keeps its query.)
+        if matches!(go, Some(Go::To(_))) {
+            self.query.clear();
         }
         go
     }

@@ -23,6 +23,7 @@ pub mod fonts;
 pub mod glyph;
 pub mod highlight;
 pub mod html;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod http;
 pub mod integrity;
 pub mod lists;

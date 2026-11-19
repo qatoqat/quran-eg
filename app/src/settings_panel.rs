@@ -102,8 +102,7 @@ impl Panel {
         let now = ctx.input(|i| i.time);
         self.translations.poll(now);
         if self.translations.items.is_empty() && self.translations.error.is_none() {
-            let client = client.clone();
-            self.translations.load(ctx, move || client.translations(LANGUAGE).map_err(|e| e.to_string()));
+            self.translations.load(ctx, client.translations_call(LANGUAGE), |list| list);
         }
         let mut close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
         let rect = Rect::from_min_max(pos2((screen.right() - WIDTH).max(screen.left()), screen.top()), screen.max);

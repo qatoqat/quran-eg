@@ -208,9 +208,10 @@ impl Reader {
             return;
         }
         self.error = None;
-        let (client, query, source, generation) = (client.clone(), self.query.clone(), self.feed.source, self.generation);
-        self.fetch = Some(task::run(task::Pool::Net, ctx, move || {
-            (generation, page, source.fetch(&client, &query, page).map_err(|e| e.to_string()))
+        let (source, generation) = (self.feed.source, self.generation);
+        self.fetch = Some(crate::net::call(ctx, source.call(client, &self.query, page), move |answer| {
+            let verses = answer.and_then(|response| source.accept(page, response));
+            (generation, page, verses.map_err(|e| e.to_string()))
         }));
     }
 
@@ -224,6 +225,7 @@ impl Reader {
                         Ok(response) => {
                             self.feed.merge(page, response);
                             self.rebuild(env);
+                            crate::stats::milestone("first-verses");
                             // A mushaf page is one unit: its other listing is fetched now.
                             if self.feed.source.loads_at_once() {
                                 self.load_more(ctx, env.client);
@@ -249,6 +251,7 @@ impl Reader {
                 self.sheet_version += 1;
                 block.accept(ctx, result, self.sheet_version);
             }
+            crate::stats::milestone("first-sheet");
         }
     }
 

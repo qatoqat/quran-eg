@@ -1,16 +1,18 @@
-//! HTTP client. Blocking (`ureq`): an egui app has no async runtime of its own,
-//! so requests run on plain worker threads that hand their result back over a
-//! channel and wake the UI. That keeps tokio and an async HTTP stack out of the
-//! binary.
+//! The API client: what to ask for (a [`Call`]: a URL and how to read the
+//! answer) and, on native targets, asking for it.
+//!
+//! Native requests block (`ureq`): the app runs them on worker threads that
+//! hand their result back over a channel and wake the UI — no async runtime in
+//! the binary. A browser can't block, so there the app sends a [`Call`] with
+//! `fetch` and gives the answer to [`Call::read`].
 
 use super::{DEFAULT_BASE_URL, query::VerseQuery, types::*};
-use crate::http::Http;
 use serde::de::DeserializeOwned;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("network error: {0}")]
-    Http(#[from] Box<ureq::Error>),
+    Http(String),
     #[error("API returned HTTP {status}: {body}")]
     Status { status: u16, body: String },
     #[error("could not parse API response: {0}")]
@@ -19,10 +21,29 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// One request to the API: where it goes and how its answer is read.
+#[derive(Debug, Clone)]
+pub struct Call<T> {
+    pub url: String,
+    parse: fn(&str) -> Result<T>,
+}
+
+impl<T> Call<T> {
+    /// Read the answer: a non-2xx status is an error that quotes the body.
+    pub fn read(&self, status: u16, body: &[u8]) -> Result<T> {
+        let body = String::from_utf8_lossy(body);
+        if !(200..300).contains(&status) {
+            return Err(Error::Status { status, body: truncate(&body, 300) });
+        }
+        (self.parse)(&body)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Client {
     base_url: String,
-    http: Http,
+    #[cfg(not(target_arch = "wasm32"))]
+    http: crate::http::Http,
 }
 
 impl Default for Client {
@@ -41,7 +62,9 @@ impl Client {
     pub fn new(base_url: impl Into<String>) -> Self {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            http: build_http(),
+            // Every request has deadlines, so a hung connection turns into a visible error.
+            #[cfg(not(target_arch = "wasm32"))]
+            http: crate::http::Http::new(std::time::Duration::from_secs(15), std::time::Duration::from_secs(45)),
         }
     }
 
@@ -63,82 +86,115 @@ impl Client {
         url
     }
 
-    fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
-        let (status, body) = self.http.get(&self.url(path, query), "application/json")?;
-        let body = String::from_utf8_lossy(&body);
-        if !(200..300).contains(&status) {
-            return Err(Error::Status { status, body: truncate(&body, 300) });
-        }
-        parse_json(&body)
+    fn call<T>(&self, path: &str, query: &[(&str, String)], parse: fn(&str) -> Result<T>) -> Call<T> {
+        Call { url: self.url(path, query), parse }
     }
 
     /// All 114 chapters, names translated into `language`.
-    pub fn chapters(&self, language: &str) -> Result<Vec<Chapter>> {
-        let r: ChaptersResponse = self.get("/chapters", &[("language", language.into())])?;
-        Ok(r.chapters)
+    pub fn chapters_call(&self, language: &str) -> Call<Vec<Chapter>> {
+        self.call("/chapters", &[("language", language.into())], |b| Ok(parse_json::<ChaptersResponse>(b)?.chapters))
     }
 
-    pub fn chapter(&self, id: u16, language: &str) -> Result<Chapter> {
-        let r: ChapterResponse =
-            self.get(&format!("/chapters/{id}"), &[("language", language.into())])?;
-        Ok(r.chapter)
+    pub fn chapter_call(&self, id: u16, language: &str) -> Call<Chapter> {
+        let query = [("language", language.into())];
+        self.call(&format!("/chapters/{id}"), &query, |b| Ok(parse_json::<ChapterResponse>(b)?.chapter))
     }
 
-    pub fn verses_by_chapter(&self, chapter: u16, q: &VerseQuery) -> Result<VersesResponse> {
-        self.get(&format!("/verses/by_chapter/{chapter}"), &q.to_pairs())
+    pub fn verses_by_chapter_call(&self, chapter: u16, q: &VerseQuery) -> Call<VersesResponse> {
+        self.call(&format!("/verses/by_chapter/{chapter}"), &q.to_pairs(), parse_json)
     }
 
-    pub fn verses_by_page(&self, page: u16, q: &VerseQuery) -> Result<VersesResponse> {
-        self.get(&format!("/verses/by_page/{page}"), &q.to_pairs())
+    pub fn verses_by_page_call(&self, page: u16, q: &VerseQuery) -> Call<VersesResponse> {
+        self.call(&format!("/verses/by_page/{page}"), &q.to_pairs(), parse_json)
     }
 
-    pub fn verses_by_juz(&self, juz: u8, q: &VerseQuery) -> Result<VersesResponse> {
-        self.get(&format!("/verses/by_juz/{juz}"), &q.to_pairs())
+    pub fn verses_by_juz_call(&self, juz: u8, q: &VerseQuery) -> Call<VersesResponse> {
+        self.call(&format!("/verses/by_juz/{juz}"), &q.to_pairs(), parse_json)
     }
 
     /// Single verse, `key` like `"2:255"`.
-    pub fn verse_by_key(&self, key: &str, q: &VerseQuery) -> Result<Verse> {
-        let r: VerseResponse = self.get(&format!("/verses/by_key/{key}"), &q.to_pairs())?;
-        Ok(r.verse)
+    pub fn verse_by_key_call(&self, key: &str, q: &VerseQuery) -> Call<Verse> {
+        self.call(&format!("/verses/by_key/{key}"), &q.to_pairs(), |b| Ok(parse_json::<VerseResponse>(b)?.verse))
     }
 
-    pub fn juzs(&self) -> Result<Vec<Juz>> {
-        let r: JuzsResponse = self.get("/juzs", &[])?;
-        Ok(r.juzs)
+    pub fn juzs_call(&self) -> Call<Vec<Juz>> {
+        self.call("/juzs", &[], |b| Ok(parse_json::<JuzsResponse>(b)?.juzs))
     }
 
     /// Available translations; names localized into `language`.
-    pub fn translations(&self, language: &str) -> Result<Vec<TranslationResource>> {
-        let r: TranslationsResponse =
-            self.get("/resources/translations", &[("language", language.into())])?;
-        Ok(r.translations)
+    pub fn translations_call(&self, language: &str) -> Call<Vec<TranslationResource>> {
+        let query = [("language", language.into())];
+        self.call("/resources/translations", &query, |b| Ok(parse_json::<TranslationsResponse>(b)?.translations))
     }
 
-    pub fn languages(&self, language: &str) -> Result<Vec<Language>> {
-        let r: LanguagesResponse =
-            self.get("/resources/languages", &[("language", language.into())])?;
-        Ok(r.languages)
+    pub fn languages_call(&self, language: &str) -> Call<Vec<Language>> {
+        let query = [("language", language.into())];
+        self.call("/resources/languages", &query, |b| Ok(parse_json::<LanguagesResponse>(b)?.languages))
     }
 
-    pub fn footnote(&self, id: u32) -> Result<FootNote> {
-        let r: FootNoteResponse = self.get(&format!("/foot_notes/{id}"), &[])?;
-        Ok(r.foot_note)
+    pub fn footnote_call(&self, id: u32) -> Call<FootNote> {
+        self.call(&format!("/foot_notes/{id}"), &[], |b| Ok(parse_json::<FootNoteResponse>(b)?.foot_note))
     }
 
     /// Full-text search. `page` is 1-based.
+    pub fn search_call(&self, query: &str, size: u32, page: u32, language: &str) -> Call<Search> {
+        let query =
+            [("q", query.into()), ("size", size.to_string()), ("page", page.to_string()), ("language", language.into())];
+        self.call("/search", &query, |b| Ok(parse_json::<SearchResponse>(b)?.search))
+    }
+}
+
+/// Asking, on targets that can block.
+#[cfg(not(target_arch = "wasm32"))]
+impl Client {
+    /// Send a call and read its answer (blocking).
+    pub fn send<T>(&self, call: &Call<T>) -> Result<T> {
+        let (status, body) = self.http.get(&call.url, "application/json").map_err(|e| Error::Http(e.to_string()))?;
+        call.read(status, &body)
+    }
+
+    pub fn chapters(&self, language: &str) -> Result<Vec<Chapter>> {
+        self.send(&self.chapters_call(language))
+    }
+
+    pub fn chapter(&self, id: u16, language: &str) -> Result<Chapter> {
+        self.send(&self.chapter_call(id, language))
+    }
+
+    pub fn verses_by_chapter(&self, chapter: u16, q: &VerseQuery) -> Result<VersesResponse> {
+        self.send(&self.verses_by_chapter_call(chapter, q))
+    }
+
+    pub fn verses_by_page(&self, page: u16, q: &VerseQuery) -> Result<VersesResponse> {
+        self.send(&self.verses_by_page_call(page, q))
+    }
+
+    pub fn verses_by_juz(&self, juz: u8, q: &VerseQuery) -> Result<VersesResponse> {
+        self.send(&self.verses_by_juz_call(juz, q))
+    }
+
+    pub fn verse_by_key(&self, key: &str, q: &VerseQuery) -> Result<Verse> {
+        self.send(&self.verse_by_key_call(key, q))
+    }
+
+    pub fn juzs(&self) -> Result<Vec<Juz>> {
+        self.send(&self.juzs_call())
+    }
+
+    pub fn translations(&self, language: &str) -> Result<Vec<TranslationResource>> {
+        self.send(&self.translations_call(language))
+    }
+
+    pub fn languages(&self, language: &str) -> Result<Vec<Language>> {
+        self.send(&self.languages_call(language))
+    }
+
+    pub fn footnote(&self, id: u32) -> Result<FootNote> {
+        self.send(&self.footnote_call(id))
+    }
+
     pub fn search(&self, query: &str, size: u32, page: u32, language: &str) -> Result<Search> {
-        let r: SearchResponse = self
-            .get(
-                "/search",
-                &[
-                    ("q", query.into()),
-                    ("size", size.to_string()),
-                    ("page", page.to_string()),
-                    ("language", language.into()),
-                ],
-            )
-            ?;
-        Ok(r.search)
+        self.send(&self.search_call(query, size, page, language))
     }
 }
 
@@ -152,12 +208,8 @@ pub fn parse_json<T: DeserializeOwned>(body: &str) -> Result<T> {
     Ok(serde_json::from_value(value)?)
 }
 
-fn build_http() -> Http {
-    Http::new(std::time::Duration::from_secs(15), std::time::Duration::from_secs(45))
-}
-
 /// Minimal application/x-www-form-urlencoded-style percent encoding (RFC 3986 unreserved kept).
-fn encode(s: &str) -> String {
+pub fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

@@ -250,6 +250,67 @@ impl fmt::Display for Location {
     }
 }
 
+/// What a URL of the web app names: a view at a reading position, or the
+/// results of a search (`/search?q=light%20%26%20dark`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    At(Location),
+    Search(String),
+}
+
+impl Place {
+    /// Parse a path with its query and hash, as the address bar has it below
+    /// the site's base. `None` if it names nothing.
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim();
+        if let Some(rest) = s.strip_prefix("/search") {
+            let query = rest.split('#').next().unwrap_or("");
+            let query = match query.strip_prefix('?') {
+                Some(pairs) => pairs.split('&').find_map(|pair| pair.strip_prefix("q=")).unwrap_or(""),
+                None if query.is_empty() || query == "/" => "",
+                None => return None,
+            };
+            return Some(Place::Search(percent_decode(query)));
+        }
+        Location::parse(s).map(Place::At)
+    }
+}
+
+impl fmt::Display for Place {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Place::At(location) => location.fmt(f),
+            Place::Search(query) => write!(f, "/search?q={}", crate::api::encode(query)),
+        }
+    }
+}
+
+/// Decode `%XX` escapes and `+` (a space, in a query); bytes that are not
+/// UTF-8 afterwards are replaced, never an error.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |at: usize| bytes.get(at).and_then(|b| (*b as char).to_digit(16));
+        match (bytes[i], hex(i + 1), hex(i + 2)) {
+            (b'%', Some(high), Some(low)) => {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+            }
+            (b'+', ..) => {
+                out.push(b' ');
+                i += 1;
+            }
+            (byte, ..) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Where the reader is: the word that starts the top line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Position {
@@ -510,6 +571,25 @@ mod tests {
         assert_eq!(r.target(Mode::Page), tip(View::Page(22).at(Some(at)), "Back to Page 22"));
         // A view whose position isn't known yet (still loading) offers the other list.
         assert_eq!(reading(View::Juz(2), None, None)[0], tip(View::SurahList.at(None), "Show the surah list"));
+    }
+
+    #[test]
+    fn places_round_trip_through_urls() {
+        for query in ["light & dark", "mercy", "50% & more #1 a+b", "نور"] {
+            let place = Place::Search(query.into());
+            let url = place.to_string();
+            assert!(url.starts_with("/search?q=") && !url.contains(' ') && !url.contains('#'), "{url}");
+            assert_eq!(Place::parse(&url), Some(place), "{url}");
+        }
+        assert_eq!(Place::parse("/search?q=light%20%26%20dark"), Some(Place::Search("light & dark".into())));
+        assert_eq!(Place::parse("/search?q=a+b&x=1#top"), Some(Place::Search("a b".into())));
+        assert_eq!(Place::parse("/search"), Some(Place::Search(String::new())));
+        assert_eq!(Place::parse("/search?q=%zz%4"), Some(Place::Search("%zz%4".into())), "a stray % is kept");
+        // Everything else is a view, as in `Location`.
+        let at = Some(WordRef { chapter: 2, verse: 142, word: 1 });
+        assert_eq!(Place::parse("/juz/2#2:142"), Some(Place::At(View::Juz(2).at(at))));
+        assert_eq!(Place::At(View::Page(589).at(None)).to_string(), "/page/589");
+        assert_eq!((Place::parse("/searching"), Place::parse("/nowhere/at/all")), (None, None));
     }
 
     #[test]

@@ -8,11 +8,6 @@ license.workspace = true
 
 [dependencies]
 quran-core.workspace = true
-# `system_fonts`: letters the built-in UI font lacks (ḥ, ṣ, ʿ in transliterations
-# and translations) are looked up in the system's fonts, on demand.
-# glow, not wgpu: a smaller binary, less memory and a faster start for an app
-# that draws textured quads. `--features wgpu` builds the other backend.
-eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "system_fonts", "wayland", "x11", "clipboard"] }
 egui = { version = "0.37", default-features = false }
 # Shaping and outlines for Arabic text outside the page fonts (egui has no
 # right-to-left layout). The versions epaint itself uses, so nothing is built twice.
@@ -20,8 +15,26 @@ harfrust = "0.12"
 skrifa = "0.44"
 zeno = { version = "0.3.3", default-features = false, features = ["eval", "std"] }
 wuff = "0.2.10"
-dirs = "7"
 qcf-glyphs = { path = "../crates/qcf-glyphs" }
+# `Instant` that also exists in a browser.
+web-time = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `system_fonts`: letters the built-in UI font lacks (ḥ, ṣ, ʿ in transliterations
+# and translations) are looked up in the system's fonts, on demand.
+# glow, not wgpu: a smaller binary, less memory and a faster start for an app
+# that draws textured quads. `--features wgpu` builds the other backend.
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "system_fonts", "wayland", "x11", "clipboard"] }
+dirs = "7"
+
+# The web build: WebGL through the same glow backend, `fetch` for HTTP.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts"] }
+ehttp = { version = "0.7", default-features = false }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "Location", "History", "Node", "Performance"] }
 
 [dev-dependencies]
 serde_json.workspace = true

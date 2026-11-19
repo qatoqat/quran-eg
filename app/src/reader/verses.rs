@@ -16,7 +16,7 @@ use quran_core::view::Location;
 
 use super::Env;
 use crate::kit;
-use crate::task::{self, Poll, Pool};
+use crate::task::{self, Poll};
 use crate::theme::Colors;
 
 /// Widest the translations run (they are centred under the page).
@@ -55,8 +55,8 @@ impl Notes {
 
     fn fetch(&mut self, id: u32, ui: &Ui, env: &Env<'_>) {
         self.fetched.entry(id).or_insert_with(|| {
-            let client = env.client.clone();
-            Note::Loading(task::run(Pool::Net, ui.ctx(), move || client.footnote(id).map(|n| n.text).map_err(|e| e.to_string())))
+            let read = |answer: Result<quran_core::api::FootNote, quran_core::api::Error>| answer.map(|n| n.text).map_err(|e| e.to_string());
+            Note::Loading(crate::net::call(ui.ctx(), env.client.footnote_call(id), read))
         });
     }
 }

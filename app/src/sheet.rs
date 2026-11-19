@@ -122,45 +122,83 @@ struct Pending {
     bitmaps: Vec<Bitmap>,
 }
 
-pub fn build(job: &Job) -> Sheet {
-    let mut pending: Vec<Pending> = Vec::with_capacity(job.requests.len());
-    let mut failed_glyphs = Vec::new();
-    for request in &job.requests {
-        let glyph = request.glyph.as_ref().and_then(|(font, code)| {
-            let font = job.fonts.get(*font)?.as_ref()?;
-            let drawn = glyph_bitmaps(font.as_ref(), code, job);
-            if drawn.is_none() {
-                failed_glyphs.push(request.key);
+/// Draw one request: its sprite if anything could be drawn, and whether its
+/// glyph failed.
+fn draw(job: &Job, request: &Request) -> (Option<Pending>, bool) {
+    let mut failed = false;
+    let glyph = request.glyph.as_ref().and_then(|(font, code)| {
+        let font = job.fonts.get(*font)?.as_ref()?;
+        let drawn = glyph_bitmaps(font.as_ref(), code, job);
+        failed = drawn.is_none();
+        let kind = if font.is_color() { Kind::Color } else { Kind::Mask };
+        Some(Pending { key: request.key, kind, glyph: true, bitmaps: drawn? })
+    });
+    let text = || {
+        let text = request.text.as_ref()?;
+        let px = job.px_per_em * text.em;
+        let mask = match text.font {
+            TextFont::Fallback => job.fallback.as_ref()?.render(&text.text, px),
+            TextFont::Number => job.fallback.as_ref()?.render_number(&text.text, px),
+            TextFont::Frame => job.ornaments.as_ref()?.frame.render_ligatures(&text.text, px),
+            TextFont::Names => job.ornaments.as_ref()?.names.render_ligatures(&text.text, px),
+        }?;
+        let rgba = mask.alpha.iter().flat_map(|a| [*a; 4]).collect();
+        let bitmap = Bitmap { width: mask.width, height: mask.height, rgba, left: mask.left, top: mask.top, advance: mask.advance };
+        Some(Pending { key: request.key, kind: Kind::Mask, glyph: false, bitmaps: vec![bitmap] })
+    };
+    (glyph.or_else(text), failed)
+}
+
+/// A sheet being built, a few requests at a time: so that in a browser, where
+/// this runs between frames, no frame waits for a whole page.
+pub struct Builder {
+    job: Job,
+    next: usize,
+    pending: Vec<Pending>,
+    failed_glyphs: Vec<u64>,
+}
+
+impl Builder {
+    pub fn new(job: Job) -> Self {
+        let pending = Vec::with_capacity(job.requests.len());
+        Self { job, next: 0, pending, failed_glyphs: Vec::new() }
+    }
+
+    /// Draw requests until the deadline; the sheet once all are drawn.
+    pub fn step(&mut self, deadline: &crate::task::Deadline) -> Option<Sheet> {
+        while let Some(request) = self.job.requests.get(self.next) {
+            let (sprite, failed) = draw(&self.job, request);
+            self.pending.extend(sprite);
+            if failed {
+                self.failed_glyphs.push(request.key);
             }
-            let kind = if font.is_color() { Kind::Color } else { Kind::Mask };
-            Some(Pending { key: request.key, kind, glyph: true, bitmaps: drawn? })
-        });
-        let text = || {
-            let text = request.text.as_ref()?;
-            let px = job.px_per_em * text.em;
-            let mask = match text.font {
-                TextFont::Fallback => job.fallback.as_ref()?.render(&text.text, px),
-                TextFont::Number => job.fallback.as_ref()?.render_number(&text.text, px),
-                TextFont::Frame => job.ornaments.as_ref()?.frame.render_ligatures(&text.text, px),
-                TextFont::Names => job.ornaments.as_ref()?.names.render_ligatures(&text.text, px),
-            }?;
-            let rgba = mask.alpha.iter().flat_map(|a| [*a; 4]).collect();
-            let bitmap = Bitmap {
-                width: mask.width,
-                height: mask.height,
-                rgba,
-                left: mask.left,
-                top: mask.top,
-                advance: mask.advance,
-            };
-            Some(Pending { key: request.key, kind: Kind::Mask, glyph: false, bitmaps: vec![bitmap] })
-        };
-        if let Some(sprite) = glyph.or_else(text) {
-            pending.push(sprite);
+            self.next += 1;
+            if deadline.expired() {
+                return None;
+            }
+        }
+        let metrics = self.job.fonts.first().and_then(|f| f.as_ref()).map(|f| f.metrics_em());
+        let (pending, failed) = (std::mem::take(&mut self.pending), std::mem::take(&mut self.failed_glyphs));
+        Some(pack(pending, self.job.px_per_em, failed, metrics))
+    }
+}
+
+impl Builder {
+    /// Give the job back, without its page fonts (to draw it as text after all).
+    pub fn into_plain_job(mut self) -> Job {
+        self.job.fonts.clear();
+        self.job
+    }
+}
+
+/// Build a whole sheet in one go.
+pub fn build(job: Job) -> Sheet {
+    let mut builder = Builder::new(job);
+    loop {
+        if let Some(sheet) = builder.step(&crate::task::Deadline::none()) {
+            return sheet;
         }
     }
-    let metrics = job.fonts.first().and_then(|f| f.as_ref()).map(|f| f.metrics_em());
-    pack(pending, job.px_per_em, failed_glyphs, metrics)
 }
 
 /// Every character of `code` must draw: a word is never shown half.
@@ -353,7 +391,7 @@ mod tests {
             px_per_em: 40.0,
             palette: Palette::Light,
         };
-        let sheet = build(&job);
+        let sheet = build(job);
         let mut drawn: Vec<u64> = sheet.sprites.keys().copied().collect();
         drawn.sort_unstable();
         // Drawn: "a"; "aa" (two parts, right to left by their advances); "az", whose second
@@ -383,7 +421,7 @@ mod tests {
             px_per_em: 40.0,
             palette: Palette::Light,
         };
-        let sheet = build(&job);
+        let sheet = build(job);
         // No sprite: the reader draws its placeholder for the word.
         assert!(sheet.sprites.is_empty() && sheet.failed_glyphs.is_empty());
         assert!(sheet.width > 0 && sheet.height > 0);

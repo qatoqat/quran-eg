@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- The build writes the site's base path here (/quran-eg/ on GitHub Pages), so
+       that this page also works as 404.html for any path below it. -->
+  <base href="/">
+  <title>The Noble Quran</title>
+  <meta name="description" content="A reader for the 15-line Madani mushaf: every word on its printed line, with word-by-word meanings.">
+  <link rel="icon" type="image/svg+xml" href="icon.svg">
+  <style>
+    html, body { height: 100%; margin: 0; overflow: hidden; background: #fdfcf9; color: #6a737d; }
+    @media (prefers-color-scheme: dark) { html, body { background: #16181d; color: #9aa0a6; } }
+    canvas { display: block; width: 100%; height: 100%; outline: none; }
+    #loading { position: fixed; inset: 0; display: grid; place-items: center; font: 16px system-ui, sans-serif; }
+  </style>
+</head>
+<body>
+  <canvas id="app"></canvas>
+  <div id="loading">Loading…</div>
+  <noscript>This app needs JavaScript and WebAssembly.</noscript>
+  <script type="module">
+    import init from "./quran-eg.js";
+    init().catch((error) => {
+      // (A panic after start-up is reported by the app's own handler.)
+      const loading = document.getElementById("loading");
+      if (loading) loading.textContent = "The app could not start: " + error;
+    });
+  </script>
+</body>
+</html>

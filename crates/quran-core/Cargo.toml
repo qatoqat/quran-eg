@@ -10,8 +10,15 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+# Blocking HTTP and the user's config directory: not in a browser.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ureq.workspace = true
 dirs = "7"
+
+# In a browser the settings live in localStorage.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = ["Window", "Storage"] }
 
 [dev-dependencies]
 pretty_assertions = "1"

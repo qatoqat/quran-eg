@@ -28,3 +28,10 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# The web build (scripts/build-web.sh): the release profile, but not stripped —
+# wasm-bindgen reads sections of the file that stripping removes (and drops
+# what the browser doesn't need itself).
+[profile.web]
+inherits = "release"
+strip = false

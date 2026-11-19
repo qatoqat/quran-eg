@@ -1,5 +1,6 @@
 //! Settings persistence: a JSON file under the user's config directory, next to
-//! the location the app was last at (view and reading position).
+//! the location the app was last at (view and reading position); in a browser,
+//! `localStorage` (and the location is the URL).
 //!
 //! All parsing/serialization lives in plain functions so it can be unit-tested.
 //! Missing or corrupt data yields `None`; nothing here panics.
@@ -106,6 +107,7 @@ pub fn save_location(location: &str) {
 pub const APP_DIR: &str = "quran-eg";
 
 /// `<config dir>/quran-eg/settings.json` and `.../location`.
+#[cfg(not(target_arch = "wasm32"))]
 mod backend {
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -174,6 +176,36 @@ mod backend {
     }
 }
 
+/// Browser: `localStorage` for the settings. The location lives in the URL.
+#[cfg(target_arch = "wasm32")]
+mod backend {
+    use super::Settings;
+
+    const STORAGE_KEY: &str = "quran-eg-settings";
+
+    fn storage() -> Option<web_sys::Storage> {
+        // `local_storage()` errors e.g. in sandboxed iframes / privacy modes.
+        web_sys::window()?.local_storage().ok().flatten()
+    }
+
+    pub fn load() -> Option<Settings> {
+        super::from_json(&storage()?.get_item(STORAGE_KEY).ok().flatten()?)
+    }
+
+    pub fn save(settings: &Settings) {
+        if let Some(s) = storage() {
+            let _ = s.set_item(STORAGE_KEY, &super::to_json(settings));
+        }
+    }
+
+    pub fn load_location() -> Option<String> {
+        None
+    }
+
+    pub fn save_location(_location: &str) {}
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 pub use backend::write_atomic;
 
 #[cfg(test)]

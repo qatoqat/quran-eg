@@ -128,7 +128,7 @@ impl Lists {
             .collect();
         self.names_job = Some(task::run(task::Pool::Draw, ui.ctx(), move || {
             let job = sheet::Job { requests, fonts: Vec::new(), fallback: Some(fallback), ornaments: None, px_per_em: NAME_SIZE * ppp, palette: Palette::Light };
-            let sheet = sheet::build(&job);
+            let sheet = sheet::build(job);
             (ppp, ColorImage::from_rgba_premultiplied([sheet.width, sheet.height], &sheet.rgba), sheet.sprites)
         }));
     }

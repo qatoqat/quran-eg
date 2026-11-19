@@ -19,6 +19,7 @@ use super::place::{Placed, label_key, word_key};
 use crate::arabic::{ArabicFont, BANNER_FRAME_TEXT, Ornaments, banner_name_text};
 use crate::glyphs::{PageGlyphs, Palette};
 use crate::sheet::{self, Request, Sprite, Text, TextFont};
+use crate::task::Deadline;
 
 /// Unicode Bismillah, the last-resort text of the Bismillah line.
 const BISMILLAH: &str = "بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ";
@@ -110,6 +111,8 @@ pub struct Block {
     pub sheet: Option<LoadedSheet>,
     /// The sheet being drawn on a worker thread, and the flag that calls it off.
     pub job: Option<(Spec, Arc<AtomicBool>)>,
+    /// When that sheet was asked for (for the statistics).
+    pub asked: web_time::Instant,
     /// Width its widest line needs at scale 1, once known.
     pub natural: Option<f32>,
 }
@@ -117,7 +120,7 @@ pub struct Block {
 impl Block {
     pub fn new(key: BlockKey, page: Rc<PageBlock>, height: f32) -> Self {
         let cells = cell_count(&page);
-        Self { key, page, cells, height, below: 0.0, placed: None, sheet: None, job: None, natural: None }
+        Self { key, page, cells, height, below: 0.0, placed: None, sheet: None, job: None, asked: web_time::Instant::now(), natural: None }
     }
 
     pub fn has_bismillah(&self) -> bool {
@@ -147,6 +150,10 @@ impl Block {
             return; // released or superseded meanwhile
         }
         self.job = None;
+        crate::stats::note(|| {
+            let fonts = result.spec.fonts;
+            format!("sheet ready: page {:?}, {} sprites, fonts {fonts:?}, {:.1} ms after it was asked for", self.key.0, result.sprites.len(), self.asked.elapsed().as_secs_f64() * 1000.0)
+        });
         let name = format!("page-{:?}-{}", self.key.0, self.key.1);
         let texture = ctx.load_texture(name.clone(), result.image, TextureOptions::LINEAR);
         let vivid = result.vivid.map(|image| ctx.load_texture(name + "-vivid", image, TextureOptions::LINEAR));
@@ -280,47 +287,76 @@ pub struct JobInput {
     pub ornaments: Option<Arc<Ornaments>>,
 }
 
-/// Draw a sheet (on a worker thread). Should drawing the glyphs ever die, the
-/// page is drawn as text instead and every glyph is reported as failed.
-/// `None` if the sheet was called off before its turn came.
-pub fn draw(input: JobInput) -> Option<SheetResult> {
-    if input.cancelled.load(Ordering::Relaxed) {
-        return None;
+/// A sheet being drawn off the frame, in steps: the glyphs a few at a time,
+/// then the images. Should drawing the glyphs ever die, the page is drawn as
+/// text instead and every glyph is reported as failed.
+pub struct Drawing {
+    cancelled: Arc<AtomicBool>,
+    key: BlockKey,
+    spec: Spec,
+    /// `None` once the glyphs are drawn (or drawing them died).
+    builder: Option<sheet::Builder>,
+    sheet: Option<sheet::Sheet>,
+}
+
+impl Drawing {
+    pub fn new(input: JobInput) -> Self {
+        let job = sheet::Job {
+            requests: input.requests,
+            fonts: input.fonts,
+            fallback: input.fallback,
+            ornaments: input.ornaments,
+            px_per_em: input.spec.px_per_em,
+            palette: input.spec.palette,
+        };
+        Self { builder: Some(sheet::Builder::new(job)), cancelled: input.cancelled, key: input.key, spec: input.spec, sheet: None }
     }
-    let mut job = sheet::Job {
-        requests: input.requests,
-        fonts: input.fonts,
-        fallback: input.fallback,
-        ornaments: input.ornaments,
-        px_per_em: input.spec.px_per_em,
-        palette: input.spec.palette,
-    };
-    let sheet = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sheet::build(&job))) {
-        Ok(sheet) => sheet,
-        Err(_) => {
-            eprintln!("quran-eg: drawing page {:?} with its font failed; showing its text", input.key.0);
-            job.fonts.clear();
-            let mut sheet = sheet::build(&job);
-            sheet.failed_glyphs = job.requests.iter().filter(|r| r.glyph.is_some()).map(|r| r.key).collect();
-            sheet
+
+    /// Do some of the work. `Some` when done: the result, or `None` if the sheet
+    /// was called off (its page scrolled away) meanwhile.
+    pub fn step(&mut self, deadline: &Deadline) -> Option<Option<SheetResult>> {
+        if self.cancelled.load(Ordering::Relaxed) {
+            return Some(None);
         }
-    };
-    // The lens's copy, if the pointer glows and the page has colours of its own.
-    let colourful = sheet.sprites.values().any(|s| s.kind == sheet::Kind::Color);
-    let vivid = (input.spec.glow > 0 && colourful).then(|| {
-        let boost = crate::pointer::boost(input.spec.glow);
-        let pixels: Vec<u8> = sheet.rgba.as_chunks::<4>().0.iter().flat_map(|px| crate::pointer::boosted(*px, boost)).collect();
-        ColorImage::from_rgba_premultiplied([sheet.width, sheet.height], &pixels)
-    });
-    Some(SheetResult {
-        key: input.key,
-        spec: input.spec,
-        vivid,
-        image: ColorImage::from_rgba_premultiplied([sheet.width, sheet.height], &sheet.rgba),
-        sprites: sheet.sprites,
-        metrics: sheet.metrics,
-        failed_glyphs: sheet.failed_glyphs,
-    })
+        if let Some(builder) = &mut self.builder {
+            let drawn = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| builder.step(deadline)));
+            self.sheet = match drawn {
+                Ok(sheet) => sheet,
+                Err(_) => {
+                    eprintln!("quran-eg: drawing page {:?} with its font failed; showing its text", self.key.0);
+                    let plain = self.builder.take()?.into_plain_job();
+                    let failed = plain.requests.iter().filter(|r| r.glyph.is_some()).map(|r| r.key).collect();
+                    let mut sheet = sheet::build(plain);
+                    sheet.failed_glyphs = failed;
+                    Some(sheet)
+                }
+            };
+            // (Not drawn yet: more in the next step.)
+            self.sheet.as_ref()?;
+            self.builder = None;
+            // In a browser the images are made in a step of their own.
+            if deadline.expired() {
+                return None;
+            }
+        }
+        let sheet = self.sheet.take()?;
+        // The lens's copy, if the pointer glows and the page has colours of its own.
+        let colourful = sheet.sprites.values().any(|s| s.kind == sheet::Kind::Color);
+        let vivid = (self.spec.glow > 0 && colourful).then(|| {
+            let boost = crate::pointer::boost(self.spec.glow);
+            let pixels: Vec<u8> = sheet.rgba.as_chunks::<4>().0.iter().flat_map(|px| crate::pointer::boosted(*px, boost)).collect();
+            ColorImage::from_rgba_premultiplied([sheet.width, sheet.height], &pixels)
+        });
+        Some(Some(SheetResult {
+            key: self.key,
+            spec: self.spec.clone(),
+            vivid,
+            image: ColorImage::from_rgba_premultiplied([sheet.width, sheet.height], &sheet.rgba),
+            sprites: sheet.sprites,
+            metrics: sheet.metrics,
+            failed_glyphs: sheet.failed_glyphs,
+        }))
+    }
 }
 
 #[cfg(test)]

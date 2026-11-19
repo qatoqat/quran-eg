@@ -2,7 +2,7 @@
 //! order and checked. This is the state and its rules; the app runs the
 //! requests on a worker thread and feeds the responses in.
 
-use crate::api::{Client, Error, Verse, VerseQuery, VersesResponse};
+use crate::api::{Call, Client, Error, Verse, VerseQuery, VersesResponse};
 use crate::integrity::{self, IntegrityIssue};
 use crate::parse::{PER_PAGE, VerseSpan, api_page_of, api_pages_for, next_page_within};
 use crate::reference;
@@ -59,26 +59,32 @@ impl VerseSource {
         }
     }
 
-    /// Fetch API page `page` of this source (blocking).
-    pub fn fetch(self, client: &Client, query: &VerseQuery, page: u32) -> Result<VersesResponse, Error> {
+    /// The call for request `page` of this source. (Request `page` of a mushaf
+    /// page is its `page`-th listing, which fits one API page.)
+    pub fn call(self, client: &Client, query: &VerseQuery, page: u32) -> Call<VersesResponse> {
         let mut q = query.with_page(page);
         q.per_page = PER_PAGE;
         match self {
-            VerseSource::Chapter { chapter, .. } => client.verses_by_chapter(chapter, &q),
-            VerseSource::Page(p) => {
-                // Request `page` of a mushaf page is its `page`-th listing, which fits one API page.
-                let listings = reference::listings_for_page(p);
-                let listing = listings.get(page as usize - 1).copied().unwrap_or(p);
-                let response = client.verses_by_page(listing, &q.with_page(1))?;
-                if response.pagination.next_page.is_some() {
-                    return Err(Error::Status {
-                        status: 0,
-                        body: format!("the listing of page {listing} has more verses than one request returns"),
-                    });
-                }
-                Ok(response)
-            }
-            VerseSource::Juz(j) => client.verses_by_juz(j, &q),
+            VerseSource::Chapter { chapter, .. } => client.verses_by_chapter_call(chapter, &q),
+            VerseSource::Page(p) => client.verses_by_page_call(self.listing(p, page), &q.with_page(1)),
+            VerseSource::Juz(j) => client.verses_by_juz_call(j, &q),
+        }
+    }
+
+    fn listing(self, mushaf_page: u16, request: u32) -> u16 {
+        let listings = reference::listings_for_page(mushaf_page);
+        listings.get(request as usize - 1).copied().unwrap_or(mushaf_page)
+    }
+
+    /// Take the answer to request `page`: a page listing that does not fit one
+    /// request is an error, not a page shown short.
+    pub fn accept(self, page: u32, response: VersesResponse) -> Result<VersesResponse, Error> {
+        match self {
+            VerseSource::Page(p) if response.pagination.next_page.is_some() => Err(Error::Status {
+                status: 0,
+                body: format!("the listing of page {} has more verses than one request returns", self.listing(p, page)),
+            }),
+            _ => Ok(response),
         }
     }
 }
@@ -268,6 +274,19 @@ mod tests {
         feed.merge(2, response(&["83:35", "84:25"], None, 2));
         assert_eq!(feed.verses.iter().map(|v| v.verse_key.as_str()).collect::<Vec<_>>(), ["83:34", "83:35"]);
         assert!(feed.complete() && feed.total.is_none());
+        // Its requests are its listings (588, then 589), one API page each.
+        let client = Client::new("https://example.org/api");
+        let query = VerseQuery::default();
+        assert!(turn.call(&client, &query, 1).url.starts_with("https://example.org/api/verses/by_page/588?"));
+        let second = turn.call(&client, &query, 2);
+        assert!(second.url.starts_with("https://example.org/api/verses/by_page/589?") && second.url.contains("&page=1&"));
+        assert!(turn.accept(1, response(&["83:34"], None, 1)).is_ok());
+        let more = turn.accept(1, response(&["83:34"], Some(2), 60)).unwrap_err();
+        assert!(more.to_string().contains("page 588 has more verses"), "{more}");
+        // Other sources page through the API's pages.
+        let juz = VerseSource::Juz(30);
+        assert!(juz.call(&client, &query, 3).url.contains("/verses/by_juz/30?") && juz.call(&client, &query, 3).url.contains("&page=3&"));
+        assert!(juz.accept(1, response(&["78:1"], Some(2), 564)).is_ok());
     }
 
     #[test]

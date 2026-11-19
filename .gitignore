@@ -1,3 +1,5 @@
 target/
+# The web build (scripts/build-web.sh).
+dist/
 # Font files for the glyph tests: fetched by crates/qcf-glyphs/tests/fixtures/fetch.sh, not kept here.
 crates/qcf-glyphs/tests/fixtures/*.woff2

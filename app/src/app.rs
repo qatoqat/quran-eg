@@ -6,7 +6,7 @@ use egui::Ui;
 use quran_core::api::{Chapter, Client, Juz, Verse, VerseQuery};
 use quran_core::lists::clean_juzs;
 use quran_core::settings::{self, LANGUAGE, Settings, storage};
-use quran_core::view::{Location, Position, Reading, View};
+use quran_core::view::{Location, Place, Position, Reading, View};
 
 use crate::fonts::FontStore;
 use crate::header::{self, HeaderAction, HeaderInput};
@@ -46,9 +46,18 @@ pub struct App {
     settings_open: bool,
     panel: Panel,
     pointer: ReadingPointer,
+    /// Frame times, for the statistics.
+    pub frames: crate::stats::Frames,
     /// The pointer's lens for this frame.
     lens: Option<Lens>,
-    /// The location as last written to disk, the one to write, and since when it differs.
+    /// (Web) The font for letters the built-in one lacks, on its way.
+    #[cfg(target_arch = "wasm32")]
+    extra_font: Option<Receiver<Vec<u8>>>,
+    /// (Web) The tab's title, as last set.
+    #[cfg(target_arch = "wasm32")]
+    title: String,
+    /// The location as last written to disk (in a browser: to the address bar),
+    /// the one to write, and since when it differs.
     saved_location: String,
     location: String,
     location_changed: f64,
@@ -58,7 +67,12 @@ impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let ctx = &cc.egui_ctx;
         let settings = storage::load().unwrap_or_default();
-        let start = storage::load_location().and_then(|l| Location::parse(&l)).unwrap_or(View::SurahList.at(None));
+        // Where to start: the place the app was last at, or in a browser the address it was opened with.
+        #[cfg(not(target_arch = "wasm32"))]
+        let start = storage::load_location().and_then(|l| Place::parse(&l));
+        #[cfg(target_arch = "wasm32")]
+        let start = Place::parse(&crate::web::current());
+        let start = start.unwrap_or(Place::At(View::SurahList.at(None)));
         let colors = Colors::of(&settings, ctx.system_theme() == Some(egui::Theme::Dark));
         colors.apply(ctx);
         let mut app = Self {
@@ -79,22 +93,40 @@ impl App {
             settings_open: false,
             panel: Panel::new(),
             pointer: ReadingPointer::default(),
+            frames: Default::default(),
             lens: None,
+            #[cfg(target_arch = "wasm32")]
+            extra_font: None,
+            #[cfg(target_arch = "wasm32")]
+            title: String::new(),
             saved_location: start.to_string(),
             location: start.to_string(),
             location_changed: 0.0,
             settings,
         };
         app.load_lists(ctx);
-        app.open(ctx, start);
+        match start {
+            Place::At(location) => app.go(ctx, location),
+            Place::Search(query) => app.search_for(ctx, &query),
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            crate::web::listen(ctx);
+            // Letters the built-in font lacks (ḥ, ṣ, ʿ): a font of the site, fetched once.
+            let (tx, rx) = std::sync::mpsc::channel();
+            crate::net::get(ctx, "fonts/NotoSans-Regular.ttf".into(), "*/*", move |fetched| {
+                if let Ok((200..=299, bytes)) = fetched {
+                    let _ = tx.send(bytes);
+                }
+            });
+            app.extra_font = Some(rx);
+        }
         app
     }
 
     fn load_lists(&mut self, ctx: &egui::Context) {
-        let client = self.client.clone();
-        self.chapters.load(ctx, move || client.chapters(LANGUAGE).map_err(|e| e.to_string()));
-        let client = self.client.clone();
-        self.juzs.load(ctx, move || client.juzs().map(clean_juzs).map_err(|e| e.to_string()));
+        self.chapters.load(ctx, self.client.chapters_call(LANGUAGE), |list| list);
+        self.juzs.load(ctx, self.client.juzs_call(), clean_juzs);
     }
 
     fn env(&mut self) -> Env<'_> {
@@ -110,8 +142,25 @@ impl App {
         }
     }
 
-    /// Go to a view, at a reading position if the location has one.
+    /// Go to a view because the reader asked to: in a browser, a new entry in the history.
     fn open(&mut self, ctx: &egui::Context, to: Location) {
+        self.go(ctx, to);
+        #[cfg(target_arch = "wasm32")]
+        self.record(Place::At(to).to_string());
+    }
+
+    /// (Web) Put a place the app went to in the address bar, as a new history entry.
+    #[cfg(target_arch = "wasm32")]
+    fn record(&mut self, location: String) {
+        if location != self.saved_location {
+            crate::web::push(&location);
+            self.location = location.clone();
+            self.saved_location = location;
+        }
+    }
+
+    /// Go to a view, at a reading position if the location has one.
+    fn go(&mut self, ctx: &egui::Context, to: Location) {
         self.search.close();
         // Already there (the toggle's own button on a page view, a link to this view):
         // nothing is loaded again; a position in it is scrolled to.
@@ -156,11 +205,8 @@ impl App {
         if self.reader.is_none() || self.bismillah_job.is_some() || current {
             return;
         }
-        let client = self.client.clone();
-        self.bismillah_job = Some(task::run(task::Pool::Net, ctx, move || {
-            let result = client.verse_by_key("1:1", &query).map_err(|e| e.to_string());
-            (query, result)
-        }));
+        let call = self.client.verse_by_key_call("1:1", &query);
+        self.bismillah_job = Some(crate::net::call(ctx, call, move |answer| (query, answer.map_err(|e| e.to_string()))));
     }
 
     /// Settings were changed in the panel: save them, and reload what depends on them.
@@ -179,9 +225,16 @@ impl App {
         }
     }
 
+    /// Show the results for `query` because the reader asked to.
+    fn show_results(&mut self, ctx: &egui::Context, query: &str) {
+        self.search_for(ctx, query);
+        #[cfg(target_arch = "wasm32")]
+        self.record(Place::Search(query.trim().to_string()).to_string());
+    }
+
     /// Show the results for `query` in place of the view (which is closed: its
     /// place is remembered for the way back).
-    fn show_results(&mut self, ctx: &egui::Context, query: &str) {
+    fn search_for(&mut self, ctx: &egui::Context, query: &str) {
         if let Some(position) = self.reader.as_ref().and_then(|r| r.position) {
             self.last_read = Some(position);
         }
@@ -211,11 +264,15 @@ impl App {
 
     /// Remember where the reader is; written to disk once it has stayed put a moment.
     fn track_location(&mut self, ctx: &egui::Context) {
-        // (Search results are not a place to come back to: the view under them stays the location.)
-        let location = match &self.reader {
-            Some(reader) => reader.location().to_string(),
-            None if self.results.is_some() => self.location.clone(),
-            None => self.view.at(None).to_string(),
+        let location = match (&self.reader, &self.results) {
+            (Some(reader), _) => reader.location().to_string(),
+            // In a browser the results have an address; natively they are not a place to
+            // come back to, and the view under them stays the location.
+            #[cfg(target_arch = "wasm32")]
+            (None, Some(results)) => Place::Search(results.query.clone()).to_string(),
+            #[cfg(not(target_arch = "wasm32"))]
+            (None, Some(_)) => self.location.clone(),
+            (None, None) => self.view.at(None).to_string(),
         };
         let now = ctx.input(|i| i.time);
         if location != self.location {
@@ -233,15 +290,58 @@ impl App {
 
     fn save_location(&mut self) {
         if self.location != self.saved_location {
+            // The same history entry, at another reading position.
+            #[cfg(target_arch = "wasm32")]
+            crate::web::replace(&self.location);
             storage::save_location(&self.location);
             self.saved_location = self.location.clone();
         }
     }
 }
 
-impl eframe::App for App {
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+/// What only the web build does each frame.
+#[cfg(target_arch = "wasm32")]
+impl App {
+    fn browser(&mut self, ctx: &egui::Context) {
+        // Work that native builds give to threads: a few milliseconds of it per frame.
+        task::pump(ctx);
+        // Back or forward: go where the address bar now is, without a new history entry.
+        if crate::web::popped() {
+            let current = crate::web::current();
+            match Place::parse(&current) {
+                Some(Place::At(location)) => self.go(ctx, location),
+                Some(Place::Search(query)) => self.search_for(ctx, &query),
+                None => self.go(ctx, View::SurahList.at(None)),
+            }
+            self.location = current.clone();
+            self.saved_location = current;
+        }
+        if let Some(Ok(bytes)) = self.extra_font.as_ref().map(|rx| rx.try_recv()) {
+            self.extra_font = None;
+            use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+            let families = [egui::FontFamily::Proportional, egui::FontFamily::Monospace]
+                .map(|family| InsertFontFamily { family, priority: FontPriority::Lowest });
+            ctx.add_font(FontInsert::new("noto-sans", egui::FontData::from_owned(bytes), families.to_vec()));
+        }
+        // The tab is named after the view.
+        let title = match (&self.results, self.view.title(&self.chapters.items)) {
+            (Some(_), _) => "Search – The Noble Quran".to_string(),
+            (None, Some(title)) => format!("{title} – The Noble Quran"),
+            (None, None) => "The Noble Quran".to_string(),
+        };
+        if title != self.title {
+            crate::web::set_title(&title);
+            self.title = title;
+        }
+    }
+}
+
+impl App {
+    /// One frame of the app.
+    fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
+        #[cfg(target_arch = "wasm32")]
+        self.browser(&ctx);
         let now = ctx.input(|i| i.time);
         self.fonts.poll();
         self.chapters.poll(now);
@@ -317,6 +417,15 @@ impl eframe::App for App {
         self.track_location(&ctx);
         // Last: where the pointer draws itself, it hides the cursor the widgets asked for.
         self.pointer.show(&ctx, &self.settings.pointer, &self.colors, ground, line_height);
+    }
+}
+
+impl eframe::App for App {
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let mut frames = std::mem::take(&mut self.frames);
+        frames.time(|| self.frame(ui));
+        self.frames = frames;
+        crate::stats::milestone("first-frame");
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {

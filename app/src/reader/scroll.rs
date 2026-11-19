@@ -240,6 +240,7 @@ impl Reader {
         block.cancel_job();
         let cancelled = Arc::new(AtomicBool::new(false));
         block.job = Some((spec.clone(), cancelled.clone()));
+        block.asked = web_time::Instant::now();
         let input = JobInput {
             cancelled,
             key: block.key,
@@ -249,7 +250,8 @@ impl Reader {
             fallback,
             ornaments,
         };
-        task::spawn(task::Pool::Draw, ctx, &self.sheets.0, move || blocks::draw(input));
+        let mut drawing = blocks::Drawing::new(input);
+        task::spawn_steps(task::Pool::Draw, ctx, &self.sheets.0, move |deadline| drawing.step(deadline));
     }
 
     /// The reading position: the first word of the first line whose middle is
