@@ -354,6 +354,11 @@ impl App {
             self.voice = None;
             return None;
         }
+        if steer.closed && self.settings.voice.stop_on_closing {
+            self.note = Some(("Listening stopped: sadaqa-llahu-l-'azim".into(), now + 5.0));
+            self.voice = None;
+            return None;
+        }
         let reader = self.reader.as_mut()?;
         if steer.scroll != 0.0 {
             reader.scroll_by(steer.scroll);

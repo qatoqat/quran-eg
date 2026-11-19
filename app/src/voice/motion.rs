@@ -47,6 +47,10 @@ pub struct Params {
     pub max_ahead: f32,
     /// Seconds to wait when the evidence is behind the pointer before easing back.
     pub wait: f32,
+    /// Experimental: a reader pausing at an ayah's end parks the pointer there, faded out, and it fades
+    /// in again wherever they go on (the next ayah, a step back, another ayah) instead of gliding
+    /// over the ayah's end mark.
+    pub ayah_fade: bool,
 }
 
 impl Params {
@@ -58,6 +62,7 @@ impl Params {
             far_jump: f32::from(m.far_jump),
             max_ahead: f32::from(m.max_ahead) / 10.0,
             wait: f32::from(m.wait_ms) / 1000.0,
+            ayah_fade: m.fade_at_ayah_end,
         }
     }
 }
@@ -95,6 +100,8 @@ pub struct Follower {
     behind_since: Option<f64>,
     /// How far it may run ahead without evidence: the end of the ayah being read (readers stop there).
     end: Option<f32>,
+    /// Parked at the end of the ayah just read, faded out (`Params::ayah_fade`).
+    parked: bool,
 }
 
 impl Follower {
@@ -108,7 +115,13 @@ impl Follower {
     pub fn update(&mut self, c: f32, reading: Reading, conf: f32, speed_units: f32, t_audio: f32, now: f64, p: &Params) -> Jump {
         let last = self.seen.back().map(|s| s.0);
         let went_back = self.target.is_some() && last.is_some_and(|l| c < l - p.fade_back) && c < self.x - p.fade_back;
-        let jump = if self.target.is_none() || went_back || c > self.x + p.far_jump { Jump::Respawn } else { Jump::Glide };
+        let mut jump = if self.target.is_none() || went_back || c > self.x + p.far_jump { Jump::Respawn } else { Jump::Glide };
+        // The ayah's last word (`end` is just inside it, from the update before).
+        let in_last_word = self.end.is_some_and(|e| c >= e - 1.0 && c <= e + 0.05);
+        if self.parked && !in_last_word {
+            jump = Jump::Respawn;
+        }
+        self.parked = in_last_word && (self.parked || (p.ayah_fade && reading == Reading::Paused));
         if jump == Jump::Respawn {
             self.x = c;
             self.v = 0.0;
@@ -138,6 +151,13 @@ impl Follower {
     /// The tracker lost the place (searching, or the word is not on this page).
     pub fn hide(&mut self) {
         self.target = None;
+        self.parked = false;
+    }
+
+    /// Parked at the end of the ayah just read: the view fades the pointer out until the next update
+    /// elsewhere (`Jump::Respawn` there).
+    pub fn parked(&self) -> bool {
+        self.parked
     }
 
     pub fn pace(&self) -> f32 {
@@ -309,5 +329,28 @@ mod tests {
         assert!(uncertainty(Reading::Locked, 1.0, 0.0) < uncertainty(Reading::Tentative, 1.0, 0.0));
         assert!(uncertainty(Reading::Drifting, 1.0, 2.0) > uncertainty(Reading::Drifting, 1.0, 0.5));
         assert!(uncertainty(Reading::Drifting, 1.0, 99.0) <= 4.0);
+    }
+
+    #[test]
+    fn a_pause_at_the_ayah_end_parks_until_the_reader_goes_on() {
+        let p = Params::default();
+        for (next, why) in [(11.1, "the next ayah"), (8.3, "a step back"), (40.0, "another ayah")] {
+            let mut f = Follower::default();
+            f.update(10.2, Reading::Locked, 0.9, 6.0, 0.0, 0.0, &p);
+            f.set_end(Some(10.95));
+            run(&mut f, 0.0, 0.5, &p);
+            assert_eq!(f.update(10.6, Reading::Paused, 0.9, 6.0, 0.5, 0.5, &p), Jump::Glide);
+            assert!(f.parked(), "paused in the last word parks");
+            f.update(10.8, Reading::Locked, 0.9, 6.0, 0.8, 0.8, &p);
+            assert!(f.parked(), "more of the last word keeps it parked");
+            assert_eq!(f.update(next, Reading::Locked, 0.9, 6.0, 1.5, 1.5, &p), Jump::Respawn, "{why}");
+            assert!(!f.parked());
+        }
+        let off = Params { ayah_fade: false, ..p };
+        let mut f = Follower::default();
+        f.update(10.2, Reading::Locked, 0.9, 6.0, 0.0, 0.0, &off);
+        f.set_end(Some(10.95));
+        f.update(10.6, Reading::Paused, 0.9, 6.0, 0.5, 0.5, &off);
+        assert!(!f.parked(), "off");
     }
 }

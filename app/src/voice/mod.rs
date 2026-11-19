@@ -38,6 +38,8 @@ pub struct Steer {
     pub scroll: f32,
     /// The place being read is not on screen: go there.
     pub go_to: Option<WordRef>,
+    /// The reader closed the reading with ṣadaqa-llāhu-l-ʿaẓīm.
+    pub closed: bool,
 }
 
 pub struct Voice {
@@ -57,6 +59,23 @@ pub struct Voice {
     /// Since when the place heard (locked) has not been on screen.
     away_since: Option<f64>,
     scrolling: bool,
+    /// The reader has just closed with ṣadaqa-llāhu-l-ʿaẓīm (until the next frame reports it).
+    closed: bool,
+}
+
+/// The listener's formulas outside the mushaf (surah 0), by number, for the title bar.
+fn formula(ayah: u16) -> &'static str {
+    match ayah {
+        1 => "isti'adha",
+        2 => "basmala",
+        3 | 4 => "sadaqa-llahu-l-'azim",
+        _ => "takbir",
+    }
+}
+
+/// The last word of ṣadaqa-llāhu-l-ʿaẓīm (0:3) or of its form with al-ʿaliyy (0:4).
+fn closes(loc: Loc) -> bool {
+    matches!(loc, (0, 3, 3) | (0, 4, 4))
 }
 
 /// `#rrggbb` at an opacity.
@@ -119,6 +138,7 @@ impl Voice {
             sent: (None, 0.0),
             away_since: None,
             scrolling: false,
+            closed: false,
         })
     }
 
@@ -133,7 +153,7 @@ impl Voice {
             (Status::Starting, _) => "◉ Joining the listener…".into(),
             (Status::Failed(e), _) => format!("Listening stopped: {e}"),
             (Status::Listening, None) => "◉ Listening: recite from any page".into(),
-            (Status::Listening, Some(h)) if h.loc.0 == 0 => format!("◉ Listening · isti'adha · {}", h.state),
+            (Status::Listening, Some(h)) if h.loc.0 == 0 => format!("◉ Listening · {} · {}", formula(h.loc.1), h.state),
             (Status::Listening, Some(h)) => format!("◉ Listening · {}:{} word {} · {}", h.loc.0, h.loc.1, h.loc.2, h.state),
         }
     }
@@ -145,6 +165,7 @@ impl Voice {
     }
 
     fn heard(&mut self, h: Heard, now: f64, params: &Params) {
+        self.closed |= closes(h.loc) && h.state == "Locked";
         match reading(&h.state).filter(|_| h.loc.0 > 0) {
             None => self.follower.hide(),
             Some(r) => {
@@ -187,7 +208,7 @@ impl Voice {
             self.link.send_visible(a.0, b.0);
             self.sent = (Some((a.0, b.0)), now);
         }
-        let mut steer = Steer::default();
+        let mut steer = Steer { closed: std::mem::take(&mut self.closed), ..Steer::default() };
         self.drawn = None;
         // The pointer runs on no further than the end of the ayah being read (readers stop there).
         if let Some(h) = &self.last
@@ -215,7 +236,8 @@ impl Voice {
             self.respawn();
         }
         self.line_y = Some(at.y);
-        self.fade = (self.fade + dt / FADE).min(1.0);
+        // Parked at the ayah's end (the reader pauses there): faded out until they go on.
+        self.fade = if self.follower.parked() { (self.fade - dt / FADE).max(0.0) } else { (self.fade + dt / FADE).min(1.0) };
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::unique("voice-range"))).with_clip_rect(area);
         let r = &settings.range;
         if r.enabled {

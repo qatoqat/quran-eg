@@ -152,6 +152,8 @@ pub struct Voice {
     pub motion: VoiceMotion,
     /// Keep the line being read in view.
     pub auto_scroll: bool,
+    /// Stop listening when the reader closes with ṣadaqa-llāhu-l-ʿaẓīm (or ṣadaqa-llāhu-l-ʿaliyyu-l-ʿaẓīm).
+    pub stop_on_closing: bool,
     /// Folder of the installed listener (`qv`, `model/`, `ref.json`, from quran-voice's
     /// `scripts/install-listener.sh`); empty = `<data dir>/quran-voice`.
     pub listener: String,
@@ -168,6 +170,7 @@ impl Default for Voice {
             range: VoiceRange::default(),
             motion: VoiceMotion::default(),
             auto_scroll: true,
+            stop_on_closing: true,
             listener: String::new(),
         }
     }
@@ -226,11 +229,13 @@ pub struct VoiceMotion {
     pub max_ahead: u8,
     /// How long it waits for the reader when ahead before easing back, ms 0..=5000.
     pub wait_ms: u16,
+    /// Fade out at an ayah's end while the reader pauses there, and in where they go on (experimental).
+    pub fade_at_ayah_end: bool,
 }
 
 impl Default for VoiceMotion {
     fn default() -> Self {
-        Self { curve: VoiceCurve::Smooth, glide_ms: 320, fade_back: 10, far_jump: 12, max_ahead: 5, wait_ms: 1500 }
+        Self { curve: VoiceCurve::Smooth, glide_ms: 320, fade_back: 10, far_jump: 12, max_ahead: 5, wait_ms: 1500, fade_at_ayah_end: true }
     }
 }
 

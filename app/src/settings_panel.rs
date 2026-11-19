@@ -389,6 +389,7 @@ fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
          the letter being read, inside a range over the words it could be on.",
     );
     check(ui, &mut voice.auto_scroll, "Keep the line being read in view");
+    check(ui, &mut voice.stop_on_closing, "Stop listening at \"sadaqa-llahu-l-'azim\"");
     check(ui, &mut voice.pointer.enabled, "Show the pointer");
     if voice.pointer.enabled {
         pointer_look(ui, colors, &mut voice.pointer, "Size (tenths of the text size)", 2..=20);
@@ -418,6 +419,7 @@ fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
     range(ui, "Fade over when jumping ahead more than (words)", &mut m.far_jump, 3..=40, 1, "");
     range(ui, "Run ahead at your pace at most (tenths of a word)", &mut m.max_ahead, 0..=30, 1, "");
     millis(ui, "Wait before easing back", &mut m.wait_ms, 0..=5000, 100);
+    check(ui, &mut m.fade_at_ayah_end, "Fade out at ayah ends (experimental)");
     ui.add_space(8.0);
     small_caps(ui, colors, "Listener");
     ui.add(egui::TextEdit::singleline(&mut voice.listener).hint_text("~/.local/share/quran-voice").desired_width(f32::INFINITY));

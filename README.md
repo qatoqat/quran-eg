@@ -83,6 +83,13 @@ folder can be set in the settings). A listener that is already running (`qv list
 started by hand, or for the quran.com extension) is joined instead of starting
 another. `QURAN_EG_LISTEN=1` starts listening when the app opens.
 
+The isti'adha and, away from al-Fatiha, the basmala are heard but not pointed at:
+the pointer waits for the surah to start. Closing with ṣadaqa-llāhu-l-ʿaẓīm stops
+listening (Settings › Voice). With "Fade out at ayah ends" (experimental, on), a
+pause at an ayah's end fades the pointer out, and it fades in wherever you go on
+instead of gliding over the ayah's mark. The listener's output goes to
+`listen.log` in its folder; the previous sessions' logs are `listen.1.log` … `listen.5.log`.
+
 ### Install on Arch Linux
 
 ```bash

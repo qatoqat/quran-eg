@@ -18,6 +18,8 @@ use tungstenite::stream::MaybeTlsStream;
 const PORT: u16 = 8765;
 /// How long a starting listener may take to load its model and open the port.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
+/// Earlier sessions' logs kept beside `listen.log`.
+const LOGS_KEPT: usize = 5;
 
 /// A word: (surah, ayah, word); surah 0 is the isti'adha.
 pub type Loc = (u16, u16, u16);
@@ -153,6 +155,11 @@ fn spawn(dir: &Path) -> Result<(Child, PathBuf), String> {
         return Err(format!("no listener installed in {} (run scripts/install-listener.sh in quran-voice)", dir.display()));
     }
     let log = dir.join("listen.log");
+    // The last few sessions' logs stay (listen.1.log is the one before), to look back at a session.
+    for i in (1..LOGS_KEPT).rev() {
+        let _ = std::fs::rename(dir.join(format!("listen.{i}.log")), dir.join(format!("listen.{}.log", i + 1)));
+    }
+    let _ = std::fs::rename(&log, dir.join("listen.1.log"));
     let out = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
     let err = out.try_clone().map_err(|e| format!("{}: {e}", log.display()))?;
     let child = Command::new(&qv)
