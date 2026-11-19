@@ -1,0 +1,31 @@
+{
+  "languages": [
+    {
+      "id": 38,
+      "name": "English",
+      "iso_code": "en",
+      "native_name": "English",
+      "direction": "ltr",
+      "translations_count": 21,
+      "translated_name": { "name": "English", "language_name": "english" }
+    },
+    {
+      "id": 9,
+      "name": "Arabic",
+      "iso_code": "ar",
+      "native_name": "العربية",
+      "direction": "rtl",
+      "translations_count": 2,
+      "translated_name": { "name": "Arabic", "language_name": "english" }
+    },
+    {
+      "id": 174,
+      "name": "Urdu",
+      "iso_code": "ur",
+      "native_name": "اردو",
+      "direction": "rtl",
+      "translations_count": 9,
+      "translated_name": { "name": "Urdu", "language_name": "english" }
+    }
+  ]
+}

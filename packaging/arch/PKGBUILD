@@ -1,0 +1,39 @@
+# Arch Linux package of the app, built from this working tree
+# (packaging/arch is two levels below the repository root).
+#
+#   paru -Bi --rebuild packaging/arch    # build and install
+#   makepkg -sif                         # the same, from inside packaging/arch
+#
+# The version stays the same between builds of the tree, so force the build
+# (--rebuild / -f); otherwise the package file of the last build is reused.
+
+pkgname=quran-eg
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="The Noble Quran: a native reader for the 15-line Madani mushaf"
+arch=('x86_64')
+url="https://quran.com"
+license=('GPL-3.0-or-later')
+# The window system and OpenGL libraries are loaded at run time (winit, glutin).
+depends=('gcc-libs' 'glibc' 'libglvnd' 'libxkbcommon' 'wayland' 'fontconfig' 'hicolor-icon-theme')
+optdepends=('libx11: X11 sessions'
+            'libxcursor: X11 sessions'
+            'libxi: X11 sessions'
+            'libxkbcommon-x11: X11 sessions')
+makedepends=('cargo')
+# The release profile already does LTO and strips; no separate debug package.
+options=('!lto' '!debug')
+
+build() {
+  cd "$startdir/../.."
+  # Its own target directory: makepkg's RUSTFLAGS would otherwise invalidate the development build.
+  CARGO_TARGET_DIR="$PWD/target/package" cargo build --release --locked -p quran-eg
+}
+
+package() {
+  cd "$startdir/../.."
+  install -Dm755 target/package/release/quran-eg "$pkgdir/usr/bin/quran-eg"
+  install -Dm644 packaging/quran-eg.desktop "$pkgdir/usr/share/applications/quran-eg.desktop"
+  install -Dm644 packaging/quran-eg.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/quran-eg.svg"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/quran-eg/README.md"
+}

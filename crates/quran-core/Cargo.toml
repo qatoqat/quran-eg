@@ -1,0 +1,17 @@
+[package]
+name = "quran-core"
+description = "Quran reader logic without a GUI: Quran.com API client, mushaf layout, integrity checks, settings"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+dirs = "7"
+
+[dev-dependencies]
+pretty_assertions = "1"

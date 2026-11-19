@@ -1,0 +1,23 @@
+pkgbase = quran-eg
+	pkgdesc = The Noble Quran: a native reader for the 15-line Madani mushaf
+	pkgver = 0.1.0
+	pkgrel = 1
+	url = https://quran.com
+	arch = x86_64
+	license = GPL-3.0-or-later
+	makedepends = cargo
+	depends = gcc-libs
+	depends = glibc
+	depends = libglvnd
+	depends = libxkbcommon
+	depends = wayland
+	depends = fontconfig
+	depends = hicolor-icon-theme
+	optdepends = libx11: X11 sessions
+	optdepends = libxcursor: X11 sessions
+	optdepends = libxi: X11 sessions
+	optdepends = libxkbcommon-x11: X11 sessions
+	options = !lto
+	options = !debug
+
+pkgname = quran-eg

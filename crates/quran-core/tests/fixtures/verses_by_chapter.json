@@ -1,0 +1,338 @@
+{
+  "verses": [
+    {
+      "id": 1,
+      "verse_number": 1,
+      "verse_key": "1:1",
+      "hizb_number": 1,
+      "rub_el_hizb_number": 1,
+      "ruku_number": 1,
+      "manzil_number": 1,
+      "sajdah_number": null,
+      "text_uthmani": "بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ",
+      "page_number": 1,
+      "juz_number": 1,
+      "words": [
+        {
+          "id": 1,
+          "position": 1,
+          "audio_url": "wbw/001_001_001.mp3",
+          "char_type_name": "word",
+          "text_uthmani": "بِسْمِ",
+          "page_number": 1,
+          "line_number": 2,
+          "text": "بِسْمِ",
+          "translation": {
+            "text": "In (the) name",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": "bis'mi",
+            "language_name": "english"
+          }
+        },
+        {
+          "id": 2,
+          "position": 2,
+          "audio_url": "wbw/001_001_002.mp3",
+          "char_type_name": "word",
+          "text_uthmani": "ٱللَّهِ",
+          "page_number": 1,
+          "line_number": 2,
+          "text": "ٱللَّهِ",
+          "translation": {
+            "text": "(of) Allah",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": "l-lahi",
+            "language_name": "english"
+          }
+        },
+        {
+          "id": 3,
+          "position": 3,
+          "audio_url": "wbw/001_001_003.mp3",
+          "char_type_name": "word",
+          "text_uthmani": "ٱلرَّحْمَٰنِ",
+          "page_number": 1,
+          "line_number": 2,
+          "text": "ٱلرَّحْمَٰنِ",
+          "translation": {
+            "text": "the Most Gracious",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": "l-raḥmāni",
+            "language_name": "english"
+          }
+        },
+        {
+          "id": 4,
+          "position": 4,
+          "audio_url": "wbw/001_001_004.mp3",
+          "char_type_name": "word",
+          "text_uthmani": "ٱلرَّحِيمِ",
+          "page_number": 1,
+          "line_number": 2,
+          "text": "ٱلرَّحِيمِ",
+          "translation": {
+            "text": "the Most Merciful",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": "l-raḥīmi",
+            "language_name": "english"
+          }
+        },
+        {
+          "id": 5,
+          "position": 5,
+          "audio_url": null,
+          "char_type_name": "end",
+          "text_uthmani": "١",
+          "page_number": 1,
+          "line_number": 2,
+          "text": "١",
+          "translation": {
+            "text": "(1)",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": null,
+            "language_name": "english"
+          }
+        }
+      ],
+      "translations": [
+        {
+          "id": 840001,
+          "resource_id": 131,
+          "text": "In the Name of Allah—the Most Compassionate, Most Merciful.",
+          "resource_name": "Dr. Mustafa Khattab, The Clear Quran",
+          "language_name": "english"
+        },
+        {
+          "id": 1181,
+          "resource_id": 20,
+          "text": "In the name of Allah, the Entirely Merciful, the Especially Merciful.",
+          "resource_name": "Saheeh International",
+          "language_name": "english"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "verse_number": 2,
+      "verse_key": "1:2",
+      "hizb_number": 1,
+      "rub_el_hizb_number": 1,
+      "ruku_number": 1,
+      "manzil_number": 1,
+      "sajdah_number": null,
+      "text_uthmani": "ٱلْحَمْدُ لِلَّهِ رَبِّ ٱلْعَٰلَمِينَ",
+      "page_number": 1,
+      "juz_number": 1,
+      "words": [
+        {
+          "id": 6,
+          "position": 1,
+          "audio_url": "wbw/001_002_001.mp3",
+          "char_type_name": "word",
+          "text_uthmani": "ٱلْحَمْدُ",
+          "page_number": 1,
+          "line_number": 3,
+          "text": "ٱلْحَمْدُ",
+          "translation": {
+            "text": "All praises and thanks",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": "al-ḥamdu",
+            "language_name": "english"
+          }
+        },
+        {
+          "id": 7,
+          "position": 2,
+          "audio_url": "wbw/001_002_002.mp3",
+          "char_type_name": "word",
+          "text_uthmani": "لِلَّهِ",
+          "page_number": 1,
+          "line_number": 3,
+          "text": "لِلَّهِ",
+          "translation": {
+            "text": "(be) to Allah",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": "lillahi",
+            "language_name": "english"
+          }
+        },
+        {
+          "id": 8,
+          "position": 3,
+          "audio_url": "wbw/001_002_003.mp3",
+          "char_type_name": "word",
+          "text_uthmani": "رَبِّ",
+          "page_number": 1,
+          "line_number": 3,
+          "text": "رَبِّ",
+          "translation": {
+            "text": "(the) Lord",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": "rabbi",
+            "language_name": "english"
+          }
+        },
+        {
+          "id": 9,
+          "position": 4,
+          "audio_url": "wbw/001_002_004.mp3",
+          "char_type_name": "word",
+          "text_uthmani": "ٱلْعَٰلَمِينَ",
+          "page_number": 1,
+          "line_number": 3,
+          "text": "ٱلْعَٰلَمِينَ",
+          "translation": {
+            "text": "of the universe",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": "l-ʿālamīna",
+            "language_name": "english"
+          }
+        },
+        {
+          "id": 10,
+          "position": 5,
+          "audio_url": null,
+          "char_type_name": "end",
+          "text_uthmani": "٢",
+          "page_number": 1,
+          "line_number": 3,
+          "text": "٢",
+          "translation": {
+            "text": "(2)",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": null,
+            "language_name": "english"
+          }
+        }
+      ],
+      "translations": [
+        {
+          "id": 840002,
+          "resource_id": 131,
+          "text": "All praise is for Allah—Lord of all worlds,<sup foot_note=77933>1</sup>",
+          "resource_name": "Dr. Mustafa Khattab, The Clear Quran",
+          "language_name": "english"
+        },
+        {
+          "id": 1182,
+          "resource_id": 20,
+          "text": "[All] praise is [due] to Allah, Lord of the worlds -",
+          "resource_name": "Saheeh International",
+          "language_name": "english"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "verse_number": 3,
+      "verse_key": "1:3",
+      "hizb_number": 1,
+      "rub_el_hizb_number": 1,
+      "ruku_number": 1,
+      "manzil_number": 1,
+      "sajdah_number": null,
+      "text_uthmani": "ٱلرَّحْمَٰنِ ٱلرَّحِيمِ",
+      "page_number": 1,
+      "juz_number": 1,
+      "words": [
+        {
+          "id": 11,
+          "position": 1,
+          "audio_url": "wbw/001_003_001.mp3",
+          "char_type_name": "word",
+          "text_uthmani": "ٱلرَّحْمَٰنِ",
+          "page_number": 1,
+          "line_number": 4,
+          "text": "ٱلرَّحْمَٰنِ",
+          "translation": {
+            "text": "The Most Gracious",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": "al-raḥmāni",
+            "language_name": "english"
+          }
+        },
+        {
+          "id": 12,
+          "position": 2,
+          "audio_url": "wbw/001_003_002.mp3",
+          "char_type_name": "word",
+          "text_uthmani": "ٱلرَّحِيمِ",
+          "page_number": 1,
+          "line_number": 4,
+          "text": "ٱلرَّحِيمِ",
+          "translation": {
+            "text": "the Most Merciful",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": "l-raḥīmi",
+            "language_name": "english"
+          }
+        },
+        {
+          "id": 13,
+          "position": 3,
+          "audio_url": null,
+          "char_type_name": "end",
+          "text_uthmani": "٣",
+          "page_number": 1,
+          "line_number": 4,
+          "text": "٣",
+          "translation": {
+            "text": "(3)",
+            "language_name": "english"
+          },
+          "transliteration": {
+            "text": null,
+            "language_name": "english"
+          }
+        }
+      ],
+      "translations": [
+        {
+          "id": 840003,
+          "resource_id": 131,
+          "text": "the Most Compassionate, Most Merciful,",
+          "resource_name": "Dr. Mustafa Khattab, The Clear Quran",
+          "language_name": "english"
+        },
+        {
+          "id": 1183,
+          "resource_id": 20,
+          "text": "The Entirely Merciful, the Especially Merciful,",
+          "resource_name": "Saheeh International",
+          "language_name": "english"
+        }
+      ]
+    }
+  ],
+  "pagination": {
+    "per_page": 3,
+    "current_page": 1,
+    "next_page": 2,
+    "total_pages": 3,
+    "total_records": 7
+  }
+}

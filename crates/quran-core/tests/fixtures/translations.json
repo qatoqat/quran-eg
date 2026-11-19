@@ -1,0 +1,28 @@
+{
+  "translations": [
+    {
+      "id": 131,
+      "name": "Dr. Mustafa Khattab, The Clear Quran",
+      "author_name": "Dr. Mustafa Khattab",
+      "slug": "clearquran-with-tafsir",
+      "language_name": "english",
+      "translated_name": { "name": "Dr. Mustafa Khattab, The Clear Quran", "language_name": "english" }
+    },
+    {
+      "id": 20,
+      "name": "Saheeh International",
+      "author_name": "Saheeh International",
+      "slug": "en-sahih-international",
+      "language_name": "english",
+      "translated_name": { "name": "Saheeh International", "language_name": "english" }
+    },
+    {
+      "id": 97,
+      "name": "Tafheem e Qur'an - Syed Abu Ali Maududi",
+      "author_name": "Syed Abu Ali Maududi",
+      "slug": null,
+      "language_name": "urdu",
+      "translated_name": { "name": "Tafheem e Qur'an - Syed Abu Ali Maududi", "language_name": "english" }
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "search": {
+    "query": "mercy",
+    "total_results": 3,
+    "current_page": 1,
+    "total_pages": 1,
+    "results": [
+      {
+        "verse_key": "21:107",
+        "verse_id": 2590,
+        "text": "وَمَآ أَرْسَلْنَٰكَ إِلَّا رَحْمَةً لِّلْعَٰلَمِينَ",
+        "highlighted": null,
+        "words": [
+          { "char_type": "word", "text": "وَمَآ" },
+          { "char_type": "word", "text": "أَرْسَلْنَٰكَ" },
+          { "char_type": "word", "text": "إِلَّا" },
+          { "char_type": "word", "text": "رَحْمَةً" },
+          { "char_type": "word", "text": "لِّلْعَٰلَمِينَ" },
+          { "char_type": "end", "text": "١٠٧" }
+        ],
+        "translations": [
+          {
+            "text": "And We have not sent you, [O Muhammad], except as a <em>mercy</em> to the worlds.",
+            "resource_id": 20,
+            "name": "Saheeh International",
+            "language_name": "english"
+          }
+        ]
+      },
+      {
+        "verse_key": "39:53",
+        "verse_id": 4111,
+        "text": "۞ قُلْ يَٰعِبَادِىَ ٱلَّذِينَ أَسْرَفُوا۟ عَلَىٰٓ أَنفُسِهِمْ لَا تَقْنَطُوا۟ مِن رَّحْمَةِ ٱللَّهِ ۚ إِنَّ ٱللَّهَ يَغْفِرُ ٱلذُّنُوبَ جَمِيعًا ۚ إِنَّهُۥ هُوَ ٱلْغَفُورُ ٱلرَّحِيمُ",
+        "highlighted": null,
+        "words": [],
+        "translations": [
+          {
+            "text": "Say, \"O My servants who have transgressed against themselves [by sinning], do not despair of the <em>mercy</em> of Allah. Indeed, Allah forgives all sins. Indeed, it is He who is the Forgiving, the Merciful.\"",
+            "resource_id": 20,
+            "name": "Saheeh International",
+            "language_name": "english"
+          }
+        ]
+      },
+      {
+        "verse_key": "7:156",
+        "verse_id": 1110,
+        "text": "وَٱكْتُبْ لَنَا فِى هَٰذِهِ ٱلدُّنْيَا حَسَنَةً وَفِى ٱلْءَاخِرَةِ إِنَّا هُدْنَآ إِلَيْكَ ۚ قَالَ عَذَابِىٓ أُصِيبُ بِهِۦ مَنْ أَشَآءُ ۖ وَرَحْمَتِى وَسِعَتْ كُلَّ شَىْءٍ ۚ فَسَأَكْتُبُهَا لِلَّذِينَ يَتَّقُونَ وَيُؤْتُونَ ٱلزَّكَوٰةَ وَٱلَّذِينَ هُم بِـَٔايَٰتِنَا يُؤْمِنُونَ",
+        "translations": [
+          {
+            "text": "And decree for us in this world [that which is] good and [also] in the Hereafter; indeed, we have turned back to You.\" [Allah] said, \"My punishment - I afflict with it whom I will, but My <em>mercy</em> encompasses all things.\" So I will decree it [especially] for those who fear Me and give zakah and those who believe in Our verses -",
+            "resource_id": 20,
+            "name": "Saheeh International",
+            "language_name": "english"
+          }
+        ]
+      }
+    ]
+  }
+}

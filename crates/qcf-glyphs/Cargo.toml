@@ -1,0 +1,15 @@
+[package]
+name = "qcf-glyphs"
+description = "Rasterises the per-page QCF mushaf fonts (V2 single-colour, V4 tajweed COLR) into RGBA glyph images."
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+skrifa = { version = "0.50", default-features = false, features = ["std"] }
+zeno = { version = "0.3.3", default-features = false, features = ["eval", "std"] }
+wuff = { version = "0.2.10", default-features = false, features = ["brotli"] }
+
+[dev-dependencies]
+png = "0.18"

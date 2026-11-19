@@ -1,0 +1,30 @@
+[package]
+name = "quran-eg"
+description = "The Noble Quran: a native 15-line Madani mushaf reader (egui)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+quran-core.workspace = true
+# `system_fonts`: letters the built-in UI font lacks (ḥ, ṣ, ʿ in transliterations
+# and translations) are looked up in the system's fonts, on demand.
+# glow, not wgpu: a smaller binary, less memory and a faster start for an app
+# that draws textured quads. `--features wgpu` builds the other backend.
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "system_fonts", "wayland", "x11", "clipboard"] }
+egui = { version = "0.37", default-features = false }
+# Shaping and outlines for Arabic text outside the page fonts (egui has no
+# right-to-left layout). The versions epaint itself uses, so nothing is built twice.
+harfrust = "0.12"
+skrifa = "0.44"
+zeno = { version = "0.3.3", default-features = false, features = ["eval", "std"] }
+wuff = "0.2.10"
+dirs = "7"
+qcf-glyphs = { path = "../crates/qcf-glyphs" }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[features]
+wgpu = ["eframe/wgpu"]

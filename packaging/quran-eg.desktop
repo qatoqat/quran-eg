@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=The Noble Quran
+GenericName=Quran Reader
+Comment=Read the Quran in the 15-line Madani mushaf
+Exec=quran-eg
+Icon=quran-eg
+Terminal=false
+Categories=Education;Spirituality;
+Keywords=quran;mushaf;islam;
+StartupWMClass=quran-eg
