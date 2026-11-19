@@ -105,6 +105,18 @@ pub struct Canvas<'a> {
     pub lens: Option<Lens>,
     /// The page's quads inside the lens, drawn from the vivid sheet.
     pub vivid: std::cell::RefCell<Option<Mesh>>,
+    /// Every word painted, with its location and box: the voice pointer's map.
+    pub slots: std::cell::RefCell<Vec<Slot>>,
+}
+
+/// A word on screen: its location (surah, ayah, word), its box (as tall as its line), the y of its
+/// baseline and the text size.
+pub type Slot = ((u16, u16, u16), Rect, f32, f32);
+
+/// `"s:a:w"` as numbers.
+fn location(s: &str) -> Option<(u16, u16, u16)> {
+    let mut it = s.split(':').map(|x| x.parse::<u16>().ok());
+    Some((it.next()??, it.next()??, it.next()??))
 }
 
 impl Canvas<'_> {
@@ -221,8 +233,14 @@ impl Canvas<'_> {
             Item::Line { cells, .. } | Item::Flow { cells, .. } => cells.get(index),
             _ => None,
         });
-        // "On hover": the hovered word is tinted and says what it means in a tooltip.
         let slot = Rect::from_min_size(pos2(left, top), vec2(word.width, m.line_height()));
+        if let Some((item, index)) = word.cell
+            && let Some(Item::Line { cells, .. } | Item::Flow { cells, .. }) = page.items.get(item)
+            && let Some(at) = cells.get(index).filter(|c| !c.is_end).and_then(|c| location(&c.location))
+        {
+            self.slots.borrow_mut().push((at, slot, baseline, m.em));
+        }
+        // "On hover": the hovered word is tinted and says what it means in a tooltip.
         if m.tooltip
             && self.hover.is_some_and(|p| slot.contains(p))
             && let Some((item, index)) = word.cell

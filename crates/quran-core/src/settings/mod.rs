@@ -135,6 +135,105 @@ impl Default for Pointer {
     }
 }
 
+/// The voice pointer: the place being recited, as quran-voice's listener hears it (`qv listen`, which
+/// quran-eg starts or joins on ws://127.0.0.1:8765). The same settings as the quran.com extension.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Voice {
+    /// The dot on the letter being read: the reading pointer's look (its size in tenths of the text
+    /// size: 8 is from the baseline to the top of the letters); `enabled` shows it.
+    pub pointer: Pointer,
+    /// A ring's line, points, 1..=20.
+    pub ring: u8,
+    /// Centre above the baseline in tenths of the text size (2: between the baseline and the head of a
+    /// fa), 0..=10.
+    pub lift: u8,
+    pub range: VoiceRange,
+    pub motion: VoiceMotion,
+    /// Keep the line being read in view.
+    pub auto_scroll: bool,
+    /// Folder of the installed listener (`qv`, `model/`, `ref.json`, from quran-voice's
+    /// `scripts/install-listener.sh`); empty = `<data dir>/quran-voice`.
+    pub listener: String,
+}
+
+pub const DEFAULT_VOICE_COLOR: &str = "#ff8c00";
+
+impl Default for Voice {
+    fn default() -> Self {
+        Self {
+            pointer: Pointer { enabled: true, shape: PointerShape::Ring, color: DEFAULT_VOICE_COLOR.into(), size: 8, opacity: 90, ..Pointer::default() },
+            ring: 10,
+            lift: 2,
+            range: VoiceRange::default(),
+            motion: VoiceMotion::default(),
+            auto_scroll: true,
+            listener: String::new(),
+        }
+    }
+}
+
+/// The accuracy range: a rounded rectangle over the words the listener could be on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceRange {
+    pub enabled: bool,
+    /// `#rrggbb`.
+    pub color: String,
+    /// Height in tenths of a line's height, 4..=20.
+    pub size: u8,
+    /// How many words of uncertainty its width covers, in tenths, 5..=30.
+    pub spread: u8,
+    /// Percent, 0..=100.
+    pub opacity: u8,
+    /// Corner radius in percent of its height, 0..=50 (50 = pill).
+    pub roundness: u8,
+    /// Outline width in points, 0..=4.
+    pub border: u8,
+}
+
+impl Default for VoiceRange {
+    fn default() -> Self {
+        Self { enabled: true, color: DEFAULT_VOICE_COLOR.into(), size: 8, spread: 10, opacity: 10, roundness: 35, border: 0 }
+    }
+}
+
+/// How the voice pointer eases toward a new place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum VoiceCurve {
+    /// Exponential approach: fast at first, settling softly.
+    #[default]
+    Smooth,
+    /// A critically damped spring: starts gently, no overshoot.
+    Spring,
+    Linear,
+    EaseOut,
+    EaseInOut,
+}
+
+/// How the voice pointer moves between the listener's updates (every ~320 ms, often in bursts).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceMotion {
+    pub curve: VoiceCurve,
+    /// Glide time in ms, 60..=1500.
+    pub glide_ms: u16,
+    /// Going back more than this (tenths of a word, 3..=50) fades over instead of moving back.
+    pub fade_back: u8,
+    /// Going forward more than this many words (3..=40) fades over instead of gliding.
+    pub far_jump: u8,
+    /// How far it may run ahead of what was heard, at the reader's pace (tenths of a word, 0..=30).
+    pub max_ahead: u8,
+    /// How long it waits for the reader when ahead before easing back, ms 0..=5000.
+    pub wait_ms: u16,
+}
+
+impl Default for VoiceMotion {
+    fn default() -> Self {
+        Self { curve: VoiceCurve::Smooth, glide_ms: 320, fade_back: 10, far_jump: 12, max_ahead: 5, wait_ms: 1500 }
+    }
+}
+
 /// Share of the gap a trail copy of the pointer closes per frame (at 60 frames a
 /// second), for a 1..=10 distance: 1 → 0.55 (tight), 5 → 0.35 (default), 10 → 0.1 (long).
 pub fn trail_lag(distance: u8) -> f32 {
@@ -234,6 +333,7 @@ pub struct Settings {
     pub theme: Theme,
     pub custom_theme: CustomTheme,
     pub pointer: Pointer,
+    pub voice: Voice,
 }
 
 impl Default for Settings {
@@ -254,6 +354,7 @@ impl Default for Settings {
             theme: Theme::default(),
             custom_theme: CustomTheme::default(),
             pointer: Pointer::default(),
+            voice: Voice::default(),
         }
     }
 }

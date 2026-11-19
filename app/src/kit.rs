@@ -122,6 +122,10 @@ pub enum Icon {
     Search,
     Settings,
     Close,
+    /// Recording the recitation: a ring, filled red while recording.
+    Record,
+    /// Following the recitation with the voice pointer: a microphone.
+    Listen,
 }
 
 /// A round icon button; `on` while what it opens is open.
@@ -152,6 +156,31 @@ pub fn icon_button(ui: &mut Ui, colors: &Colors, icon: Icon, on: bool) -> Respon
             Icon::Close => {
                 painter.line_segment([c + vec2(-5.0, -5.0), c + vec2(5.0, 5.0)], stroke);
                 painter.line_segment([c + vec2(5.0, -5.0), c + vec2(-5.0, 5.0)], stroke);
+            }
+            Icon::Record => {
+                if on {
+                    painter.circle_filled(c, 6.0, egui::Color32::from_rgb(220, 38, 38));
+                } else {
+                    painter.circle_stroke(c, 6.0, stroke);
+                    painter.circle_filled(c, 2.4, stroke.color);
+                }
+            }
+            Icon::Listen => {
+                // A capsule on a stand, with the cradle around its lower half.
+                let capsule = egui::Rect::from_center_size(c - vec2(0.0, 2.5), vec2(6.0, 10.0));
+                if on {
+                    painter.rect_filled(capsule, egui::CornerRadius::same(3), stroke.color);
+                } else {
+                    painter.rect_stroke(capsule, egui::CornerRadius::same(3), stroke, egui::StrokeKind::Middle);
+                }
+                let cradle: Vec<egui::Pos2> = (0..=12)
+                    .map(|k| {
+                        let a = std::f32::consts::PI * k as f32 / 12.0;
+                        c + vec2(-6.0 * a.cos(), -1.0 + 6.0 * a.sin())
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(cradle, stroke));
+                painter.line_segment([c + vec2(0.0, 5.0), c + vec2(0.0, 8.0)], stroke);
             }
         }
     }

@@ -42,6 +42,15 @@ servers and kept in `~/.cache/quran-eg/fonts/`.
 - **Reading pointer** (optional): a dot or ring in place of the mouse cursor below
   the header, with colour, size, opacity, trail, soft edge, shrinking with speed, and
   a glow that makes the tajweed colours under it more vivid.
+- **Recording and voice pointer** (desktop): the microphone button records your
+  recitation with a note of the word it started at (`~/.local/share/quran-eg/recordings/`),
+  for adapting quran-voice's model to your voice (its `qv enroll`). **Listen** follows the recitation with
+  quran-voice's listener and puts a dot on the letter being read, inside an accuracy
+  range (a rounded rectangle over the words it could be on, wider when unsure), and
+  keeps the line in view. Settings: the dot's look (as the reading pointer), the
+  range's colour, height, width, opacity, roundness and outline, and the motion
+  (easing curve, glide time, when to fade over instead of moving back or jumping
+  ahead, how far it may run ahead at your pace, how long it waits for you).
 - **Search**: suggestions under the search box (shortcuts such as `2:255`,
   `juz 30`, `page 3`, `kahf 10`, and matching verses), and a results view with
   highlighted matches and paging.
@@ -63,6 +72,16 @@ frame (it asks for server-side decoration).
 
 `QURAN_EG_STATS=1` prints once a second what a view holds in memory (pages laid
 out, sprite sheets, fonts).
+
+### Voice pointer
+
+Listen runs quran-voice's native listener (`qv listen`: the microphone, the model
+and the tracker, all Rust) in its own process, so the reader stays light, and
+follows it over `ws://127.0.0.1:8765`. Install it once from a quran-voice checkout
+with `scripts/install-listener.sh` (into `~/.local/share/quran-voice`; another
+folder can be set in the settings). A listener that is already running (`qv listen`
+started by hand, or for the quran.com extension) is joined instead of starting
+another. `QURAN_EG_LISTEN=1` starts listening when the app opens.
 
 ### Install on Arch Linux
 

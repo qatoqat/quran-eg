@@ -9,6 +9,7 @@
 //! - `theme`, `kit`: colours and small widgets.
 //! - `task`, `net`: work and requests off the frame (threads natively, a queue and `fetch` in a browser).
 //! - `web` (web build only): the address bar, history and tab title.
+//! - `recorder`, `voice` (desktop only): recording the recitation, and the voice pointer that follows it.
 
 mod app;
 mod arabic;
@@ -20,6 +21,8 @@ mod lists;
 mod net;
 mod pointer;
 mod reader;
+#[cfg(not(target_arch = "wasm32"))]
+mod recorder;
 mod remote;
 mod search;
 mod settings_panel;
@@ -27,6 +30,8 @@ mod sheet;
 mod stats;
 mod task;
 mod theme;
+#[cfg(not(target_arch = "wasm32"))]
+mod voice;
 
 #[cfg(target_arch = "wasm32")]
 mod web;

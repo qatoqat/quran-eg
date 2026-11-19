@@ -78,7 +78,7 @@ pub struct ReadingPointer {
 impl ReadingPointer {
     /// Diameter of the pointer for a line this tall.
     fn diameter(pointer: &Pointer, line_height: f32) -> f32 {
-        line_height * f32::from(pointer.size.clamp(1, 10)) / 10.0
+        line_height * f32::from(pointer.size.clamp(1, 20)) / 10.0
     }
 
     /// Whether the pointer stands in for the cursor at `at`: below the header,
@@ -89,10 +89,18 @@ impl ReadingPointer {
 
     /// The glow's lens for this frame, if the pointer glows and is over the page.
     pub fn lens(&self, ctx: &egui::Context, pointer: &Pointer, area: Rect, line_height: f32) -> Option<Lens> {
-        if !pointer.enabled || pointer.glow == 0 {
+        if !pointer.enabled {
             return None;
         }
         let at = ctx.input(|i| i.pointer.hover_pos()).filter(|at| Self::over_page(ctx, area, *at))?;
+        self.lens_at(pointer, at, line_height)
+    }
+
+    /// The glow's lens with the pointer at `at`, if it glows.
+    pub fn lens_at(&self, pointer: &Pointer, at: Pos2, line_height: f32) -> Option<Lens> {
+        if pointer.glow == 0 {
+            return None;
+        }
         let blur = f32::from(pointer.blur.min(10)) * 0.03;
         let size = if self.size > 0.0 { self.size } else { 1.0 };
         let radius = Self::diameter(pointer, line_height) * (1.0 + 2.0 * blur) / 2.0 * size;
@@ -104,10 +112,31 @@ impl ReadingPointer {
     pub fn show(&mut self, ctx: &egui::Context, pointer: &Pointer, colors: &Colors, area: Rect, line_height: f32) {
         let hover = ctx.input(|i| i.pointer.hover_pos());
         let Some(at) = hover.filter(|at| pointer.enabled && Self::over_page(ctx, area, *at)) else {
-            self.shown = false;
-            self.last = None;
+            self.hide();
             return;
         };
+        self.draw(ctx, pointer, colors, area, line_height, at, 1.0, "reading-pointer", None);
+        ctx.set_cursor_icon(egui::CursorIcon::None);
+    }
+
+    /// Nothing drawn: the next pointer appears with its trail gathered at one place.
+    pub fn hide(&mut self) {
+        self.shown = false;
+        self.last = None;
+    }
+
+    /// Move the pointer to `at` (not the mouse: the voice pointer) and draw it at `alpha` of its
+    /// opacity, on its own layer.
+    /// `size` is what the pointer's size is in tenths of (the voice pointer: the text size); `ring`, a
+    /// ring's line in points instead of a share of its size.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn show_at(&mut self, ctx: &egui::Context, pointer: &Pointer, colors: &Colors, area: Rect, size: f32, ring: Option<f32>, at: Pos2, alpha: f32) {
+        self.draw(ctx, pointer, colors, area, size, at, alpha, "voice-pointer", ring);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw(&mut self, ctx: &egui::Context, pointer: &Pointer, colors: &Colors, area: Rect, line_height: f32, at: Pos2, alpha: f32, layer: &'static str, ring: Option<f32>) {
         let (now, dt) = ctx.input(|i| (i.time, i.stable_dt.min(0.1)));
         let frames = dt * RATE;
         let trail = usize::from(pointer.trail.min(10));
@@ -151,10 +180,10 @@ impl ReadingPointer {
         }
 
         let [r, g, b] = parse_hex(&pointer.color).unwrap_or([255; 3]);
-        let opacity = f32::from(pointer.opacity.clamp(5, 100)) / 100.0;
+        let opacity = f32::from(pointer.opacity.clamp(5, 100)) / 100.0 * alpha.clamp(0.0, 1.0);
         let diameter = Self::diameter(pointer, line_height);
         let blur = diameter * f32::from(pointer.blur.min(10)) * 0.03;
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::unique("reading-pointer")));
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::unique(layer)));
         let painter = painter.with_clip_rect(area);
         // Farthest copy first, the head last.
         for (i, centre) in self.dots.iter().enumerate().rev() {
@@ -164,7 +193,8 @@ impl ReadingPointer {
             let color = |a: f32| Color32::from_rgba_unmultiplied(r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8);
             let band = match pointer.shape {
                 PointerShape::Circle => radius,
-                PointerShape::Ring => diameter * RING * (0.4 + 0.6 * fade) * self.size,
+                // A ring keeps its hole: a set line is at most a quarter of its width.
+                PointerShape::Ring => ring.map_or(diameter * RING, |r| r.min(diameter / 4.0)) * (0.4 + 0.6 * fade) * self.size,
             };
             if blur < 0.25 {
                 match pointer.shape {
@@ -176,10 +206,9 @@ impl ReadingPointer {
             }
             // A hairline keeps a light pointer visible on a light page.
             if i == 0 && !colors.dark && blur < 0.25 {
-                painter.circle_stroke(*centre, radius, Stroke::new(1.0, Color32::from_black_alpha(51)));
+                painter.circle_stroke(*centre, radius, Stroke::new(1.0, Color32::from_black_alpha((51.0 * alpha.clamp(0.0, 1.0)) as u8)));
             }
         }
-        ctx.set_cursor_icon(egui::CursorIcon::None);
     }
 }
 

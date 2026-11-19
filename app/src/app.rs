@@ -61,6 +61,14 @@ pub struct App {
     saved_location: String,
     location: String,
     location_changed: f64,
+    /// Recording the recitation (header button).
+    #[cfg(not(target_arch = "wasm32"))]
+    recorder: Option<crate::recorder::Recorder>,
+    /// Following the recitation with the voice pointer (header button).
+    #[cfg(not(target_arch = "wasm32"))]
+    voice: Option<crate::voice::Voice>,
+    /// A note for the title bar (a recording saved, the listener stopped) until a time.
+    note: Option<(String, f64)>,
 }
 
 impl App {
@@ -102,12 +110,22 @@ impl App {
             saved_location: start.to_string(),
             location: start.to_string(),
             location_changed: 0.0,
+            #[cfg(not(target_arch = "wasm32"))]
+            recorder: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            voice: None,
+            note: None,
             settings,
         };
         app.load_lists(ctx);
         match start {
             Place::At(location) => app.go(ctx, location),
             Place::Search(query) => app.search_for(ctx, &query),
+        }
+        // `QURAN_EG_LISTEN=1`: follow the recitation from the start.
+        #[cfg(not(target_arch = "wasm32"))]
+        if std::env::var_os("QURAN_EG_LISTEN").is_some_and(|v| v == "1") {
+            app.toggle_listening(ctx, 0.0);
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -251,10 +269,18 @@ impl App {
         let reading = Reading { view, here, last: here.or(self.last_read), juzs: &self.juzs.items, chapters: &self.chapters.items };
         let input = HeaderInput {
             content_width: settings::content_width_px(self.settings.content_width) as f32,
-            title: view.and_then(|v| v.title(&self.chapters.items)),
+            title: self.status().or_else(|| view.and_then(|v| v.title(&self.chapters.items))),
             mode: view.map(|v| v.mode()),
             targets: quran_core::view::Mode::ALL.map(|mode| reading.target(mode)),
             settings_open: self.settings_open,
+            #[cfg(not(target_arch = "wasm32"))]
+            recording: self.recorder.as_ref().map(|r| (r.elapsed(), r.start_word().to_string())),
+            #[cfg(target_arch = "wasm32")]
+            recording: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            listening: self.voice.as_ref().map(|v| v.summary()),
+            #[cfg(target_arch = "wasm32")]
+            listening: None,
         };
         let mut search = std::mem::take(&mut self.search);
         let action = header::show(ui, &mut self.env(), &mut search, input);
@@ -285,6 +311,100 @@ impl App {
             } else {
                 ctx.request_repaint_after_secs(SAVE_DELAY as f32);
             }
+        }
+    }
+
+    /// What the title bar says instead of the view's title: recording, listening, or a note.
+    fn status(&self) -> Option<String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let listening = self.voice.as_ref().map(|v| v.summary());
+            if let Some(r) = &self.recorder {
+                let rec = format!("● Recording from {} · {:.0}:{:02.0}", r.start_word(), (r.elapsed() / 60.0).floor(), r.elapsed() % 60.0);
+                return Some(listening.map_or(rec.clone(), |l| format!("{rec} · {}", l.trim_start_matches("◉ Listening · "))));
+            }
+            if listening.is_some() {
+                return listening;
+            }
+        }
+        self.note.as_ref().map(|(note, _)| note.clone())
+    }
+
+    /// Starts following the recitation (joining or starting quran-voice's listener), or stops.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn toggle_listening(&mut self, ctx: &egui::Context, now: f64) {
+        if self.voice.take().is_some() {
+            return;
+        }
+        match crate::voice::Voice::start(&self.settings.voice, ctx) {
+            Ok(voice) => self.voice = Some(voice),
+            Err(e) => self.note = Some((format!("Listening: {e}"), now + 10.0)),
+        }
+    }
+
+    /// The voice pointer's frame, after the reader has painted: it draws itself and steers the reader
+    /// (scrolling along, or going to the place being read). Returns a view to open, if it must.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn follow_voice(&mut self, ctx: &egui::Context, ground: egui::Rect, now: f64) -> Option<Location> {
+        let voice = self.voice.as_mut()?;
+        let words = self.reader.as_ref().filter(|_| self.results.is_none()).map_or(&[][..], |r| &r.words[..]);
+        let steer = voice.frame(ctx, &self.settings.voice, &self.colors, words, ground);
+        if let crate::voice::Status::Failed(e) = voice.status() {
+            self.note = Some((format!("Listening stopped: {e}"), now + 10.0));
+            self.voice = None;
+            return None;
+        }
+        let reader = self.reader.as_mut()?;
+        if steer.scroll != 0.0 {
+            reader.scroll_by(steer.scroll);
+        }
+        let at = steer.go_to?;
+        let same_surah = matches!(self.view, View::Surah { chapter, .. } if chapter == at.chapter);
+        if same_surah || reader.has_verse(&format!("{}:{}", at.chapter, at.verse)) {
+            reader.go_to(Some(at));
+            None
+        } else {
+            Some(View::surah(at.chapter).at(Some(at)))
+        }
+    }
+
+    /// Starts recording at the reading position, or stops and saves (for `qv enroll`).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn toggle_recording(&mut self, now: f64) {
+        let result = match self.recorder.take() {
+            Some(r) => r.finish().map(|wav| format!("Saved {}", wav.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()))),
+            None => match self.reader.as_ref().and_then(|r| r.position) {
+                Some(at) => crate::recorder::Recorder::start(&at).map(|r| {
+                    self.recorder = Some(r);
+                    String::new()
+                }),
+                None => Err("Open a surah, juz or page to record from".into()),
+            },
+        };
+        self.note = match result {
+            Ok(note) if note.is_empty() => None,
+            Ok(note) => Some((note, now + 5.0)),
+            Err(e) => Some((format!("Recording: {e}"), now + 8.0)),
+        };
+    }
+
+    /// Notes reading-position changes while recording; stops on a microphone error; keeps the timer ticking.
+    fn track_recording(&mut self, ctx: &egui::Context, now: f64) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(r) = &mut self.recorder {
+            r.track(self.reader.as_ref().and_then(|x| x.position.as_ref()));
+            if let Some(e) = r.error() {
+                let r = self.recorder.take().expect("recording");
+                let saved = r.finish().map_or_else(|f| format!(" ({f})"), |_| " (saved what was recorded)".into());
+                self.note = Some((format!("Microphone error: {e}{saved}"), now + 10.0));
+            }
+            ctx.request_repaint_after_secs(0.25);
+        }
+        if self.note.as_ref().is_some_and(|(_, until)| now > *until) {
+            self.note = None;
+        }
+        if let Some((_, until)) = &self.note {
+            ctx.request_repaint_after_secs((*until - now).max(0.1) as f32);
         }
     }
 
@@ -363,8 +483,15 @@ impl App {
             Some(HeaderAction::Open(to)) => go = Some(to),
             Some(HeaderAction::Results(query)) => self.show_results(&ctx, &query),
             Some(HeaderAction::ToggleSettings) => self.settings_open = !self.settings_open,
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(HeaderAction::ToggleRecord) => self.toggle_recording(now),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(HeaderAction::ToggleListen) => self.toggle_listening(&ctx, now),
+            #[cfg(target_arch = "wasm32")]
+            Some(HeaderAction::ToggleRecord | HeaderAction::ToggleListen) => {}
             None => {}
         }
+        self.track_recording(&ctx, now);
 
         // Everything below the header is the pointer's ground.
         let ground = ui.available_rect_before_wrap();
@@ -373,6 +500,11 @@ impl App {
             |reader| reader.line_height,
         );
         self.lens = self.pointer.lens(&ctx, &self.settings.pointer, ground, line_height);
+        // A glowing voice pointer lights the words under it instead.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(lens) = self.voice.as_ref().and_then(|v| v.lens(&self.settings.voice)) {
+            self.lens = Some(lens);
+        }
 
         let mut retry = false;
         egui::CentralPanel::default().frame(egui::Frame::new().fill(self.colors.bg)).show(ui, |ui| {
@@ -410,6 +542,10 @@ impl App {
         if retry {
             self.load_lists(&ctx);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(to) = self.follow_voice(&ctx, ground, now) {
+            go = go.or(Some(to));
+        }
         if let Some(to) = go {
             self.open(&ctx, to);
             ctx.request_repaint();
@@ -429,6 +565,16 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // Stops the listener if this app started it.
+        #[cfg(not(target_arch = "wasm32"))]
+        drop(self.voice.take());
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(r) = self.recorder.take() {
+            match r.finish() {
+                Ok(wav) => eprintln!("recording saved: {}", wav.display()),
+                Err(e) => eprintln!("recording not saved: {e}"),
+            }
+        }
         self.save_location();
         storage::save(&self.settings);
     }

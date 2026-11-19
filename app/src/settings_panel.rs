@@ -143,6 +143,8 @@ impl Panel {
                     self.translation_picker(ui, colors, settings);
                     sizes(ui, colors, settings);
                     pointer(ui, colors, settings);
+                    #[cfg(not(target_arch = "wasm32"))]
+                    voice(ui, colors, settings);
                     self.advanced(ui, colors, settings);
                 });
             });
@@ -337,16 +339,20 @@ fn pointer(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
         colors,
         "A dot or ring in place of the mouse cursor below the top bar. The cursor comes back over the top bar and these settings.",
     );
-    if !pointer.enabled {
-        return;
+    if pointer.enabled {
+        pointer_look(ui, colors, pointer, "Size (tenths of a line's height)", 1..=10);
     }
+}
+
+/// The reading pointer's look (the mouse's, or the voice pointer's dot).
+fn pointer_look(ui: &mut Ui, colors: &Colors, pointer: &mut quran_core::settings::Pointer, size: &str, sizes: std::ops::RangeInclusive<u8>) {
     ui.add_space(4.0);
     ui.label("Colour and shape");
     ui.horizontal(|ui| {
         color(ui, &mut pointer.color, "");
         segmented(ui, colors, &mut pointer.shape, &[(PointerShape::Circle, "Circle"), (PointerShape::Ring, "Ring")]);
     });
-    range(ui, "Size (tenths of a line's height)", &mut pointer.size, 1..=10, 1, "");
+    range(ui, size, &mut pointer.size, sizes, 1, "");
     range(ui, "Opacity", &mut pointer.opacity, 5..=100, 5, "%");
     range(ui, "Trail", &mut pointer.trail, 0..=10, 1, "");
     if pointer.trail > 0 {
@@ -355,4 +361,65 @@ fn pointer(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
     range(ui, "Blur", &mut pointer.blur, 0..=10, 1, "");
     range(ui, "Shrink with speed", &mut pointer.shrink, 0..=10, 1, "");
     range(ui, "Glow (stronger colours under the pointer; blur softens its edge)", &mut pointer.glow, 0..=10, 1, "");
+}
+
+/// A slider for a value in milliseconds, shown in seconds.
+#[cfg(not(target_arch = "wasm32"))]
+fn millis(ui: &mut Ui, label: &str, value: &mut u16, range: std::ops::RangeInclusive<u16>, step: u16) {
+    ui.add_space(4.0);
+    ui.label(label);
+    ui.horizontal(|ui| {
+        let rail = (ui.available_width() - 52.0).max(60.0);
+        ui.spacing_mut().slider_width = rail;
+        let slider = egui::Slider::new(value, range).step_by(f64::from(step)).show_value(false);
+        ui.add_sized(vec2(rail, 18.0), slider);
+        ui.label(format!("{:.2} s", f32::from(*value) / 1000.0));
+    });
+}
+
+/// The voice pointer: its dot, the accuracy range around it and how it moves (desktop only).
+#[cfg(not(target_arch = "wasm32"))]
+fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
+    legend(ui, "Voice pointer");
+    let voice = &mut settings.voice;
+    help(
+        ui,
+        colors,
+        "Listen (the microphone in the top bar) follows your recitation with quran-voice's listener and puts a dot on \
+         the letter being read, inside a range over the words it could be on.",
+    );
+    check(ui, &mut voice.auto_scroll, "Keep the line being read in view");
+    check(ui, &mut voice.pointer.enabled, "Show the pointer");
+    if voice.pointer.enabled {
+        pointer_look(ui, colors, &mut voice.pointer, "Size (tenths of the text size)", 2..=20);
+        if voice.pointer.shape == PointerShape::Ring {
+            range(ui, "Ring line", &mut voice.ring, 1..=20, 1, " pt");
+        }
+        range(ui, "Centre above the baseline (tenths of the text size)", &mut voice.lift, 0..=10, 1, "");
+    }
+    ui.add_space(8.0);
+    small_caps(ui, colors, "Accuracy range");
+    let r = &mut voice.range;
+    check(ui, &mut r.enabled, "Show the range (wider when unsure)");
+    if r.enabled {
+        color(ui, &mut r.color, "Colour");
+        range(ui, "Height (tenths of a line's height)", &mut r.size, 4..=20, 1, "");
+        range(ui, "Width per unsure word (tenths)", &mut r.spread, 5..=30, 1, "");
+        range(ui, "Opacity", &mut r.opacity, 0..=100, 2, "%");
+        range(ui, "Roundness", &mut r.roundness, 0..=50, 5, "%");
+        range(ui, "Outline", &mut r.border, 0..=4, 1, " pt");
+    }
+    ui.add_space(8.0);
+    small_caps(ui, colors, "Motion");
+    let m = &mut voice.motion;
+    segmented(ui, colors, &mut m.curve, &crate::voice::CURVES);
+    millis(ui, "Glide time", &mut m.glide_ms, 60..=1500, 20);
+    range(ui, "Fade over when going back more than (tenths of a word)", &mut m.fade_back, 3..=50, 1, "");
+    range(ui, "Fade over when jumping ahead more than (words)", &mut m.far_jump, 3..=40, 1, "");
+    range(ui, "Run ahead at your pace at most (tenths of a word)", &mut m.max_ahead, 0..=30, 1, "");
+    millis(ui, "Wait before easing back", &mut m.wait_ms, 0..=5000, 100);
+    ui.add_space(8.0);
+    small_caps(ui, colors, "Listener");
+    ui.add(egui::TextEdit::singleline(&mut voice.listener).hint_text("~/.local/share/quran-voice").desired_width(f32::INFINITY));
+    help(ui, colors, "The folder quran-voice's scripts/install-listener.sh installs to. A listener already running is joined instead.");
 }

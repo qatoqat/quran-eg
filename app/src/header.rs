@@ -17,6 +17,10 @@ pub enum HeaderAction {
     /// Show the search results for a query.
     Results(String),
     ToggleSettings,
+    /// Start or stop recording the recitation (for training the voice pointer).
+    ToggleRecord,
+    /// Start or stop following the recitation with the voice pointer.
+    ToggleListen,
 }
 
 /// What the header shows.
@@ -28,6 +32,10 @@ pub struct HeaderInput {
     /// Where each of the toggle's buttons leads, and its tooltip.
     pub targets: [(Location, String); 3],
     pub settings_open: bool,
+    /// Recording: seconds so far and the word it started at.
+    pub recording: Option<(f32, String)>,
+    /// Listening: what the listener hears.
+    pub listening: Option<String>,
 }
 
 pub fn show(ui: &mut Ui, env: &mut Env<'_>, search: &mut SearchBox, input: HeaderInput) -> Option<HeaderAction> {
@@ -59,6 +67,23 @@ pub fn show(ui: &mut Ui, env: &mut Env<'_>, search: &mut SearchBox, input: Heade
     }
     if kit::icon_button(&mut right, colors, Icon::Search, search.open).clicked() {
         search.toggle();
+    }
+    // The microphone is the desktop app's (the web build has neither button).
+    if cfg!(not(target_arch = "wasm32")) {
+        let tip = match &input.listening {
+            Some(now) => format!("Stop listening ({now})"),
+            None => "Follow your recitation: a pointer on the letter being read (quran-voice's listener)".into(),
+        };
+        if kit::icon_button(&mut right, colors, Icon::Listen, input.listening.is_some()).on_hover_text(tip).clicked() {
+            action = Some(HeaderAction::ToggleListen);
+        }
+        let tip = match &input.recording {
+            Some((secs, from)) => format!("Stop recording ({:.0}:{:02.0}, from {from})", (secs / 60.0).floor(), secs % 60.0),
+            None => "Record your recitation from the top line, to train the voice pointer on your voice".into(),
+        };
+        if kit::icon_button(&mut right, colors, Icon::Record, input.recording.is_some()).on_hover_text(tip).clicked() {
+            action = Some(HeaderAction::ToggleRecord);
+        }
     }
     let tools_left = right.min_rect().left();
     let brand_right = left.min_rect().right();

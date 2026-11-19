@@ -15,6 +15,7 @@ harfrust = "0.12"
 skrifa = "0.44"
 zeno = { version = "0.3.3", default-features = false, features = ["eval", "std"] }
 wuff = "0.2.10"
+serde_json.workspace = true
 qcf-glyphs = { path = "../crates/qcf-glyphs" }
 # `Instant` that also exists in a browser.
 web-time = "1"
@@ -26,6 +27,10 @@ web-time = "1"
 # that draws textured quads. `--features wgpu` builds the other backend.
 eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "system_fonts", "wayland", "x11", "clipboard"] }
 dirs = "7"
+# Microphone for recording the recitation (training data for the voice pointer).
+cpal = "0.18.2"
+# The voice pointer follows quran-voice's listener (`qv listen`) over a local WebSocket.
+tungstenite = "0.30"
 
 # The web build: WebGL through the same glow backend, `fetch` for HTTP.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -36,8 +41,6 @@ wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window", "Document", "Element", "HtmlElement", "HtmlCanvasElement", "Location", "History", "Node", "Performance"] }
 
-[dev-dependencies]
-serde_json.workspace = true
 
 [features]
 wgpu = ["eframe/wgpu"]

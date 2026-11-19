@@ -30,6 +30,8 @@ use quran_core::settings::{self, Settings, WbwDisplay};
 use quran_core::view::{Location, Position, View, WordRef};
 
 use self::blocks::{Block, SheetResult, block_key};
+#[cfg(not(target_arch = "wasm32"))]
+pub use self::paint::Slot;
 use self::place::Metrics;
 use crate::fonts::FontStore;
 use crate::pointer::Lens;
@@ -131,6 +133,8 @@ pub struct Reader {
     reported: f64,
     /// Footnotes and copy state of the verse translations.
     notes: verses::Notes,
+    /// The words painted last frame, in reading order, with their boxes (for the voice pointer).
+    pub words: Vec<paint::Slot>,
 }
 
 impl Reader {
@@ -147,6 +151,18 @@ impl Reader {
         if at.is_some() {
             self.pending = at;
         }
+    }
+
+    /// Scroll by `dy` points (the voice pointer keeping the line being read in view).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn scroll_by(&mut self, dy: f32) {
+        self.scroll = (self.scroll + dy).max(0.0);
+    }
+
+    /// Whether this view has loaded the verse (`"2:255"`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn has_verse(&self, verse_key: &str) -> bool {
+        self.feed.has_verse(verse_key)
     }
 
     /// A view that has not asked for anything yet.
@@ -175,6 +191,7 @@ impl Reader {
             line_height: settings::mushaf_em(env.settings.arabic_font_scale) * settings::MUSHAF_LINE,
             reported: 0.0,
             notes: verses::Notes::default(),
+            words: Vec::new(),
         }
     }
 
@@ -408,6 +425,7 @@ impl Reader {
             tip: Default::default(),
             lens: env.lens,
             vivid: Default::default(),
+            slots: Default::default(),
         };
         let left = (column.center().x - metrics.line_width / 2.0).round();
         let translations = env.settings.show_page_translation;
@@ -456,5 +474,7 @@ impl Reader {
         }
         self.scroll += shift;
         canvas.finish(ui.ctx());
+        self.words = canvas.slots.take();
+        self.words.sort_by_key(|w| w.0);
     }
 }
