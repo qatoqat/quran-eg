@@ -44,7 +44,15 @@ fn main() -> eframe::Result {
         .with_inner_size([1100.0, 860.0])
         .with_min_inner_size([420.0, 320.0]);
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native("quran-eg", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+    eframe::run_native(
+        "quran-eg",
+        options,
+        Box::new(|cc| {
+            // A wheel notch scrolls 120 points, as in a browser (quran-dx); egui's native default is 40.
+            cc.egui_ctx.options_mut(|o| o.input_options.line_scroll_speed = 120.0);
+            Ok(Box::new(app::App::new(cc)))
+        }),
+    )
 }
 
 /// The web build: the app runs in the page's canvas (see `web/index.html`).
