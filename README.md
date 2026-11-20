@@ -40,17 +40,20 @@ servers and kept in `~/.cache/quran-eg/fonts/`.
   pointer, and a font source. Saved in `~/.config/quran-eg/settings.json`, in the
   same shape quran-dx uses.
 - **Reading pointer** (optional): a dot or ring in place of the mouse cursor below
-  the header, with colour, size, opacity, trail, soft edge, shrinking with speed, and
-  a glow that makes the tajweed colours under it more vivid.
+  the header, with colour, size, opacity, a soft edge, a smudge along the path it has
+  just travelled (a motion blur, with a strength and a distance), shrinking with
+  speed, and a glow that makes the tajweed colours under it more vivid.
 - **Recording and voice pointer** (desktop): the microphone button records your
   recitation with a note of the word it started at (`~/.local/share/quran-eg/recordings/`),
   for adapting quran-voice's model to your voice (its `qv enroll`). **Listen** follows the recitation with
   quran-voice's listener and puts a dot on the letter being read, inside an accuracy
   range (a rounded rectangle over the words it could be on, wider when unsure), and
   keeps the line in view. Settings: the dot's look (as the reading pointer), the
-  range's colour, height, width, opacity, roundness and outline, and the motion
-  (easing curve, glide time, when to fade over instead of moving back or jumping
-  ahead, how far it may run ahead at your pace, how long it waits for you).
+  range's colour, height, width, opacity, roundness, outline and edge blur, and the
+  motion (an easing curve and glide time each for the pointer and for either edge of
+  the range, when to fade over instead of moving back or jumping ahead, how far it
+  may run ahead at your pace, how long it waits for you while the range reaches back
+  to where you are heard).
 - **Search**: suggestions under the search box (shortcuts such as `2:255`,
   `juz 30`, `page 3`, `kahf 10`, and matching verses), and a results view with
   highlighted matches and paging.
@@ -81,14 +84,30 @@ follows it over `ws://127.0.0.1:8765`. Install it once from a quran-voice checko
 with `scripts/install-listener.sh` (into `~/.local/share/quran-voice`; another
 folder can be set in the settings). A listener that is already running (`qv listen`
 started by hand, or for the quran.com extension) is joined instead of starting
-another. `QURAN_EG_LISTEN=1` starts listening when the app opens.
+another. `QURAN_EG_LISTEN=1` starts listening when the app opens, and
+`QURAN_EG_VOICE_PORT` picks another port than 8765 (for tests with a stand-in).
+
+While it listens, the Listen button shows the microphone: its disc fills from the
+bottom as high as the listener hears you (empty below −54 dBFS, full at −6), turns
+red for a moment when the input clips, and is struck through when no audio arrives
+or capture fails. Its tooltip says which, with the level and the microphone's name;
+the title bar says so too. A listener that does not report its microphone leaves
+the button as it was.
 
 The isti'adha and, away from al-Fatiha, the basmala are heard but not pointed at:
 the pointer waits for the surah to start. Closing with ṣadaqa-llāhu-l-ʿaẓīm stops
-listening (Settings › Voice). With "Fade out at ayah ends" (experimental, on), a
-pause at an ayah's end fades the pointer out, and it fades in wherever you go on
-instead of gliding over the ayah's mark. The listener's output goes to
-`listen.log` in its folder; the previous sessions' logs are `listen.1.log` … `listen.5.log`.
+listening (Settings › Voice). With "Fade out when you pause at an ayah's end" (on),
+a pause at an ayah's end longer than the set delay (1 s) fades the pointer out, and
+it fades in wherever you go on instead of gliding over the ayah's mark. The
+listener's output goes to `listen.log` in its folder; the previous sessions' logs
+are `listen.1.log` … `listen.5.log`.
+
+A place heard far from where the recitation was being followed (another surah, or
+more than about a page away) counts as lost for a while (5 s by default): the
+pointer hides and the page stays, in case it was a slip or a mishearing, and the
+title bar says so. The reader goes there only if the recitation keeps being followed
+there, reading on, for that long; reading on into the next page or surah is followed
+as before.
 
 ### Install on Arch Linux
 
@@ -205,9 +224,9 @@ a page that holds none of its surah was judged worse than this difference from t
 - A custom font source that is an absolute path is a folder on this computer.
 - Search results are not part of the saved location: the app starts in the view
   that was open under them.
-- The pointer's opacity applies to each trail copy on its own (overlapping copies
-  add up slightly), and its glow acts on the tajweed colours only, not on the page
-  behind them.
+- The pointer smudges along its path instead of leaving a trail of copies; the
+  smudge is at most 70 % of the pointer's opacity (at strength 10), and its glow acts
+  on the tajweed colours only, not on the page behind them.
 - Right-to-left translation languages are laid out left to right (the picker
   offers English translations only).
 

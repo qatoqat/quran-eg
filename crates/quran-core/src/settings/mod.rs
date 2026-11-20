@@ -104,10 +104,10 @@ pub struct Pointer {
     pub size: u8,
     /// Percent, 5..=100.
     pub opacity: u8,
-    /// Number of fading copies that follow it, 0..=10.
-    pub trail: u8,
-    /// How far those copies fall behind, 1..=10 (5 = default look).
-    pub trail_distance: u8,
+    /// How strongly it smears along its path while it moves, 0..=10 (0 = none).
+    pub smudge: u8,
+    /// How far the smear reaches behind it, 1..=10 (5 = default look).
+    pub smudge_distance: u8,
     /// Softness of its edge, 0..=10.
     pub blur: u8,
     /// How much the colours of the text under it are intensified, 0..=10.
@@ -126,8 +126,8 @@ impl Default for Pointer {
             color: DEFAULT_POINTER_COLOR.into(),
             size: 5,
             opacity: 50,
-            trail: 0,
-            trail_distance: 5,
+            smudge: 0,
+            smudge_distance: 5,
             blur: 0,
             glow: 0,
             shrink: 0,
@@ -143,7 +143,7 @@ pub struct Voice {
     /// The dot on the letter being read: the reading pointer's look (its size in tenths of the text
     /// size: 8 is from the baseline to the top of the letters); `enabled` shows it.
     pub pointer: Pointer,
-    /// A ring's line, points, 1..=20.
+    /// A ring's line, points, 1..=40 (never more than a quarter of the ring's width).
     pub ring: u8,
     /// Centre above the baseline in tenths of the text size (2: between the baseline and the head of a
     /// fa), 0..=10.
@@ -152,6 +152,10 @@ pub struct Voice {
     pub motion: VoiceMotion,
     /// Keep the line being read in view.
     pub auto_scroll: bool,
+    /// How long a place heard far from where the recitation was being followed must keep being followed
+    /// before the reader goes there, ms 0..=20000 (0 = as any other place); until then it counts as
+    /// lost: a slip, or the listener's mistake.
+    pub far_wait_ms: u16,
     /// Stop listening when the reader closes with ṣadaqa-llāhu-l-ʿaẓīm (or ṣadaqa-llāhu-l-ʿaliyyu-l-ʿaẓīm).
     pub stop_on_closing: bool,
     /// Folder of the installed listener (`qv`, `model/`, `ref.json`, from quran-voice's
@@ -170,6 +174,7 @@ impl Default for Voice {
             range: VoiceRange::default(),
             motion: VoiceMotion::default(),
             auto_scroll: true,
+            far_wait_ms: 5000,
             stop_on_closing: true,
             listener: String::new(),
         }
@@ -191,13 +196,15 @@ pub struct VoiceRange {
     pub opacity: u8,
     /// Corner radius in percent of its height, 0..=50 (50 = pill).
     pub roundness: u8,
-    /// Outline width in points, 0..=4.
+    /// Outline width in points, 0..=12.
     pub border: u8,
+    /// Softness of its edge, 0..=10.
+    pub blur: u8,
 }
 
 impl Default for VoiceRange {
     fn default() -> Self {
-        Self { enabled: true, color: DEFAULT_VOICE_COLOR.into(), size: 8, spread: 10, opacity: 10, roundness: 35, border: 0 }
+        Self { enabled: true, color: DEFAULT_VOICE_COLOR.into(), size: 8, spread: 10, opacity: 10, roundness: 35, border: 0, blur: 0 }
     }
 }
 
@@ -214,13 +221,30 @@ pub enum VoiceCurve {
     EaseInOut,
 }
 
+/// How one moving part of the voice pointer eases to a new place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceGlide {
+    pub curve: VoiceCurve,
+    /// Glide time in ms, 60..=1500.
+    pub ms: u16,
+}
+
+impl Default for VoiceGlide {
+    fn default() -> Self {
+        Self { curve: VoiceCurve::Smooth, ms: 320 }
+    }
+}
+
 /// How the voice pointer moves between the listener's updates (every ~320 ms, often in bursts).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VoiceMotion {
-    pub curve: VoiceCurve,
-    /// Glide time in ms, 60..=1500.
-    pub glide_ms: u16,
+    pub pointer: VoiceGlide,
+    /// The accuracy range's edge behind the pointer, toward what was read.
+    pub range_start: VoiceGlide,
+    /// The accuracy range's edge ahead of the pointer.
+    pub range_end: VoiceGlide,
     /// Going back more than this (tenths of a word, 3..=50) fades over instead of moving back.
     pub fade_back: u8,
     /// Going forward more than this many words (3..=40) fades over instead of gliding.
@@ -229,20 +253,35 @@ pub struct VoiceMotion {
     pub max_ahead: u8,
     /// How long it waits for the reader when ahead before easing back, ms 0..=5000.
     pub wait_ms: u16,
-    /// Fade out at an ayah's end while the reader pauses there, and in where they go on (experimental).
+    /// Fade out at an ayah's end while the reader pauses there, and in where they go on.
     pub fade_at_ayah_end: bool,
+    /// How long the reader must have paused there before it fades, ms 0..=10000 (0 = at once).
+    pub ayah_fade_delay_ms: u16,
 }
 
 impl Default for VoiceMotion {
     fn default() -> Self {
-        Self { curve: VoiceCurve::Smooth, glide_ms: 320, fade_back: 10, far_jump: 12, max_ahead: 5, wait_ms: 1500, fade_at_ayah_end: true }
+        Self {
+            pointer: VoiceGlide::default(),
+            range_start: VoiceGlide::default(),
+            range_end: VoiceGlide::default(),
+            fade_back: 10,
+            far_jump: 12,
+            max_ahead: 5,
+            wait_ms: 1500,
+            fade_at_ayah_end: true,
+            ayah_fade_delay_ms: 1000,
+        }
     }
 }
 
-/// Share of the gap a trail copy of the pointer closes per frame (at 60 frames a
-/// second), for a 1..=10 distance: 1 → 0.55 (tight), 5 → 0.35 (default), 10 → 0.1 (long).
-pub fn trail_lag(distance: u8) -> f32 {
-    (60.0 - 5.0 * f32::from(distance.clamp(1, 10))) / 100.0
+/// How far a pointer's smudge reaches behind it, for a 1..=10 distance: how long ago (seconds) a
+/// stretch of its path may have been travelled and still smear, and at most how many pointer widths
+/// of path. 1 → (0.15 s, 0.5), 5 → (0.75 s, 2.5), 10 → (1.5 s, 5): the time lets a voice pointer at
+/// reading pace (about a width per 0.3 s) just reach the full length; the length caps a fast mouse's.
+pub fn smudge_reach(distance: u8) -> (f32, f32) {
+    let d = f32::from(distance.clamp(1, 10));
+    (0.15 * d, 0.5 * d)
 }
 
 /// `#rrggbb` (lower case) if `color` is one, so it can go into a stylesheet as is.
@@ -489,9 +528,11 @@ mod tests {
     }
 
     #[test]
-    fn longer_distance_means_slower_catch_up() {
-        assert!(close(trail_lag(1), 0.55) && close(trail_lag(5), 0.35) && close(trail_lag(10), 0.1));
-        assert!(close(trail_lag(0), 0.55) && close(trail_lag(99), 0.1));
+    fn smudge_reach_grows_with_distance() {
+        for (d, secs, widths) in [(1, 0.15, 0.5), (5, 0.75, 2.5), (10, 1.5, 5.0), (0, 0.15, 0.5), (99, 1.5, 5.0)] {
+            let (s, w) = smudge_reach(d);
+            assert!(close(s, secs) && close(w, widths), "{d}: {s} s, {w} widths");
+        }
     }
 
     #[test]

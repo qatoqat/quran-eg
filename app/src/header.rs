@@ -5,7 +5,7 @@
 use egui::{Align, FontId, Layout, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
 use quran_core::view::{Location, Mode, View};
 
-use crate::kit::{self, Icon, Pill};
+use crate::kit::{self, Icon, Mic, Pill};
 use crate::reader::Env;
 use crate::search::{Go, SearchBox};
 use crate::theme::Colors;
@@ -34,9 +34,20 @@ pub struct HeaderInput {
     pub settings_open: bool,
     /// Recording: seconds so far and the word it started at.
     pub recording: Option<(f32, String)>,
-    /// Listening: what the listener hears.
-    pub listening: Option<String>,
+    pub listening: Option<Listening>,
 }
+
+/// Listening: what the listener hears, and how its microphone does.
+pub struct Listening {
+    pub summary: String,
+    pub mic: Mic,
+    /// The microphone's level or trouble, and its name, for the tooltip.
+    pub mic_line: Option<String>,
+}
+
+/// The Listen button's tooltip while listening: room for its usual lines (longer ones wrap), and
+/// narrow enough to sit right of the button from the default window width up.
+const LISTEN_TIP_WIDTH: f32 = 360.0;
 
 pub fn show(ui: &mut Ui, env: &mut Env<'_>, search: &mut SearchBox, input: HeaderInput) -> Option<HeaderAction> {
     let colors = env.colors;
@@ -70,11 +81,21 @@ pub fn show(ui: &mut Ui, env: &mut Env<'_>, search: &mut SearchBox, input: Heade
     }
     // The microphone is the desktop app's (the web build has neither button).
     if cfg!(not(target_arch = "wasm32")) {
-        let tip = match &input.listening {
-            Some(now) => format!("Stop listening ({now})"),
-            None => "Follow your recitation: a pointer on the letter being read (quran-voice's listener)".into(),
+        let mic = input.listening.as_ref().map_or(Mic::Off, |l| l.mic);
+        let button = kit::icon_button(&mut right, colors, Icon::Listen(mic), input.listening.is_some());
+        let button = match &input.listening {
+            Some(Listening { summary, mic_line, .. }) => {
+                let tip = mic_line.as_ref().map_or(format!("Stop listening ({summary})"), |line| format!("Stop listening ({summary})\n{line}"));
+                // The same width whatever it says: egui puts a tooltip on the side of the button where
+                // its last size fits, so one whose numbers change would jump from side to side.
+                button.on_hover_ui(|ui| {
+                    ui.set_width(LISTEN_TIP_WIDTH);
+                    ui.label(tip);
+                })
+            }
+            None => button.on_hover_text("Follow your recitation: a pointer on the letter being read (quran-voice's listener)"),
         };
-        if kit::icon_button(&mut right, colors, Icon::Listen, input.listening.is_some()).on_hover_text(tip).clicked() {
+        if button.clicked() {
             action = Some(HeaderAction::ToggleListen);
         }
         let tip = match &input.recording {

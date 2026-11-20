@@ -263,6 +263,8 @@ impl App {
     }
 
     fn header(&mut self, ui: &mut Ui) -> Option<HeaderAction> {
+        #[cfg(not(target_arch = "wasm32"))]
+        let now = ui.input(|i| i.time);
         let here = self.reader.as_ref().and_then(|r| r.position);
         // Search results belong to no mode and have no title.
         let view = self.results.is_none().then_some(self.view);
@@ -278,7 +280,7 @@ impl App {
             #[cfg(target_arch = "wasm32")]
             recording: None,
             #[cfg(not(target_arch = "wasm32"))]
-            listening: self.voice.as_ref().map(|v| v.summary()),
+            listening: self.voice.as_ref().map(|v| v.listening(now)),
             #[cfg(target_arch = "wasm32")]
             listening: None,
         };
@@ -333,12 +335,25 @@ impl App {
     /// Starts following the recitation (joining or starting quran-voice's listener), or stops.
     #[cfg(not(target_arch = "wasm32"))]
     fn toggle_listening(&mut self, ctx: &egui::Context, now: f64) {
+        // The header, painted before this, shows the change (the spinner, or off) on the next frame.
+        ctx.request_repaint();
         if self.voice.take().is_some() {
             return;
         }
         match crate::voice::Voice::start(&self.settings.voice, ctx) {
             Ok(voice) => self.voice = Some(voice),
             Err(e) => self.note = Some((format!("Listening: {e}"), now + 10.0)),
+        }
+    }
+
+    /// The listener's news, before the header shows it; a listener that failed is dropped.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn hear_voice(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(voice) = self.voice.as_mut() else { return };
+        voice.poll(ctx, &self.settings.voice);
+        if let crate::voice::Status::Failed(e) = voice.status() {
+            self.note = Some((format!("Listening stopped: {e}"), now + 10.0));
+            self.voice = None;
         }
     }
 
@@ -349,14 +364,11 @@ impl App {
         let voice = self.voice.as_mut()?;
         let words = self.reader.as_ref().filter(|_| self.results.is_none()).map_or(&[][..], |r| &r.words[..]);
         let steer = voice.frame(ctx, &self.settings.voice, &self.colors, words, ground);
-        if let crate::voice::Status::Failed(e) = voice.status() {
-            self.note = Some((format!("Listening stopped: {e}"), now + 10.0));
-            self.voice = None;
-            return None;
-        }
         if steer.closed && self.settings.voice.stop_on_closing {
             self.note = Some(("Listening stopped: sadaqa-llahu-l-'azim".into(), now + 5.0));
             self.voice = None;
+            // The header, already painted, still shows the microphone on.
+            ctx.request_repaint();
             return None;
         }
         let reader = self.reader.as_mut()?;
@@ -482,6 +494,8 @@ impl App {
             colors.apply(&ctx);
         }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        self.hear_voice(&ctx, now);
         let mut go = None;
         let bar = egui::Panel::top("header").exact_size(header::HEIGHT).frame(egui::Frame::new()).show_separator_line(false);
         match bar.show(ui, |ui| self.header(ui)).inner {

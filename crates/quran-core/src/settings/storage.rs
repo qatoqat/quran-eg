@@ -5,6 +5,8 @@
 //! All parsing/serialization lives in plain functions so it can be unit-tested.
 //! Missing or corrupt data yields `None`; nothing here panics.
 
+use serde_json::Value;
+
 use super::Settings;
 
 /// Serialize settings to the JSON stored on disk / in localStorage.
@@ -15,21 +17,71 @@ pub fn to_json(settings: &Settings) -> String {
 
 /// Parse stored JSON. Unknown fields are ignored and missing ones take defaults;
 /// malformed JSON or wrongly-typed values yield `None`, except that non-numeric
-/// entries of the `translations` array are dropped. Values are normalized.
+/// entries of the `translations` array are dropped. Settings of earlier versions
+/// are carried over ([`migrate`]). Values are normalized.
 pub fn from_json(raw: &str) -> Option<Settings> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
     }
-    let mut value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let mut value: Value = serde_json::from_str(raw).ok()?;
     if let Some(list) = value.get_mut("translations").and_then(|t| t.as_array_mut()) {
         // Keep only resource ids (numbers that fit a u32); their language can't be
         // verified offline, so the settings page lets the user remove stray ones.
         list.retain(|v| v.as_u64().is_some_and(|n| u32::try_from(n).is_ok()));
     }
+    migrate(&mut value);
     let mut settings: Settings = serde_json::from_value(value).ok()?;
     normalize(&mut settings);
     Some(settings)
+}
+
+/// Settings an earlier version stored, in today's terms. Done on the JSON, not with serde aliases:
+/// a file holding an old key and its new one must still parse (the new one wins).
+fn migrate(value: &mut Value) {
+    if let Some(pointer) = value.get_mut("pointer") {
+        trail_to_smudge(pointer);
+    }
+    let Some(voice) = value.get_mut("voice") else { return };
+    if let Some(pointer) = voice.get_mut("pointer") {
+        trail_to_smudge(pointer);
+    }
+    if let Some(motion) = voice.get_mut("motion") {
+        one_glide_to_three(motion);
+    }
+}
+
+/// A pointer's trail of fading copies (`trail`, `trail_distance`) becomes its smudge. Off stays off,
+/// and a trail gets 3 more strength: its first copy had half the pointer's opacity or more whatever
+/// their number, where the smudge starts at 7 % of it per step, so a short trail would turn into a
+/// barely visible smear.
+fn trail_to_smudge(pointer: &mut Value) {
+    let Some(pointer) = pointer.as_object_mut() else { return };
+    if !pointer.contains_key("smudge")
+        && let Some(trail) = pointer.get("trail").and_then(Value::as_u64)
+    {
+        pointer.insert("smudge".into(), (if trail == 0 { 0 } else { trail.min(7) + 3 }).into());
+    }
+    if !pointer.contains_key("smudge_distance")
+        && let Some(distance) = pointer.get("trail_distance").and_then(Value::as_u64)
+    {
+        pointer.insert("smudge_distance".into(), distance.clamp(1, 10).into());
+    }
+}
+
+/// The voice pointer's one curve and glide time (`curve`, `glide_ms`) become its pointer's and both
+/// of its range's edges' (the range rode on the pointer, so the look stays).
+fn one_glide_to_three(motion: &mut Value) {
+    let Some(motion) = motion.as_object_mut() else { return };
+    if motion.contains_key("pointer") || !(motion.contains_key("curve") || motion.contains_key("glide_ms")) {
+        return;
+    }
+    let curve = motion.get("curve").cloned().unwrap_or_else(|| "Smooth".into());
+    let ms = motion.get("glide_ms").cloned().unwrap_or_else(|| 320.into());
+    let glide = serde_json::json!({ "curve": curve, "ms": ms });
+    for part in ["pointer", "range_start", "range_end"] {
+        motion.entry(part).or_insert_with(|| glide.clone());
+    }
 }
 
 /// Clamp/repair values that may have been hand-edited or written by older versions.
@@ -46,20 +98,21 @@ pub fn normalize(s: &mut Settings) {
     let pointer = &mut s.pointer;
     pointer.size = pointer.size.clamp(1, 10);
     pointer.opacity = pointer.opacity.clamp(5, 100);
-    pointer.trail = pointer.trail.min(10);
-    pointer.trail_distance = pointer.trail_distance.clamp(1, 10);
+    pointer.smudge = pointer.smudge.min(10);
+    pointer.smudge_distance = pointer.smudge_distance.clamp(1, 10);
     pointer.blur = pointer.blur.min(10);
     pointer.glow = pointer.glow.min(10);
     pointer.shrink = pointer.shrink.min(10);
     pointer.color = super::sanitize_color(&pointer.color).unwrap_or_else(|| super::DEFAULT_POINTER_COLOR.into());
     let voice = &mut s.voice;
-    voice.ring = voice.ring.clamp(1, 20);
+    voice.ring = voice.ring.clamp(1, 40);
     voice.lift = voice.lift.min(10);
+    voice.far_wait_ms = voice.far_wait_ms.min(20000);
     let dot = &mut voice.pointer;
     dot.size = dot.size.clamp(2, 20);
     dot.opacity = dot.opacity.clamp(5, 100);
-    dot.trail = dot.trail.min(10);
-    dot.trail_distance = dot.trail_distance.clamp(1, 10);
+    dot.smudge = dot.smudge.min(10);
+    dot.smudge_distance = dot.smudge_distance.clamp(1, 10);
     dot.blur = dot.blur.min(10);
     dot.glow = dot.glow.min(10);
     dot.shrink = dot.shrink.min(10);
@@ -70,13 +123,17 @@ pub fn normalize(s: &mut Settings) {
     range.spread = range.spread.clamp(5, 30);
     range.opacity = range.opacity.min(100);
     range.roundness = range.roundness.min(50);
-    range.border = range.border.min(4);
+    range.border = range.border.min(12);
+    range.blur = range.blur.min(10);
     let motion = &mut voice.motion;
-    motion.glide_ms = motion.glide_ms.clamp(60, 1500);
+    for glide in [&mut motion.pointer, &mut motion.range_start, &mut motion.range_end] {
+        glide.ms = glide.ms.clamp(60, 1500);
+    }
     motion.fade_back = motion.fade_back.clamp(3, 50);
     motion.far_jump = motion.far_jump.clamp(3, 40);
     motion.max_ahead = motion.max_ahead.min(30);
     motion.wait_ms = motion.wait_ms.min(5000);
+    motion.ayah_fade_delay_ms = motion.ayah_fade_delay_ms.min(10000);
     let mut seen = std::collections::HashSet::new();
     s.translations.retain(|id| seen.insert(*id));
     s.font_base_url = sanitize_font_base_url(&s.font_base_url).unwrap_or_default();
@@ -237,7 +294,7 @@ pub use backend::write_atomic;
 mod tests {
     use super::backend::{load_from_path, save_to_path};
     use super::*;
-    use crate::settings::{MushafFont, WbwDisplay};
+    use crate::settings::{MushafFont, VoiceCurve, VoiceGlide, WbwDisplay};
 
     #[test]
     fn real_files_are_out_of_reach_in_tests() {
@@ -263,6 +320,76 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(from_json(&to_json(&s)), Some(s));
+    }
+
+    #[test]
+    fn earlier_pointer_and_motion_settings_carry_over() {
+        let old = r#"{"pointer":{"trail":3,"trail_distance":7},"voice":{"pointer":{"trail":0,"trail_distance":2},"motion":{"curve":"Linear","glide_ms":500,"fade_at_ayah_end":true}}}"#;
+        let s = from_json(old).unwrap();
+        assert_eq!((s.pointer.smudge, s.pointer.smudge_distance), (6, 7));
+        assert_eq!((s.voice.pointer.smudge, s.voice.pointer.smudge_distance), (0, 2));
+        let glide = VoiceGlide { curve: VoiceCurve::Linear, ms: 500 };
+        let m = &s.voice.motion;
+        assert_eq!((m.pointer, m.range_start, m.range_end), (glide, glide, glide));
+        assert!(m.fade_at_ayah_end);
+        assert_eq!((m.ayah_fade_delay_ms, s.voice.far_wait_ms, s.voice.range.blur), (1000, 5000, 0));
+        // The voice pointer's longest trail and thickest ring of before.
+        let s = from_json(r#"{"voice":{"pointer":{"trail":4,"trail_distance":7},"ring":20}}"#).unwrap();
+        assert_eq!((s.voice.pointer.smudge, s.voice.pointer.smudge_distance, s.voice.ring), (7, 7, 20));
+        let s = from_json(r#"{"pointer":{"trail":10,"trail_distance":0}}"#).unwrap();
+        assert_eq!((s.pointer.smudge, s.pointer.smudge_distance), (10, 1));
+        // Absurd hand-edited values neither overflow nor wrap.
+        let s = from_json(r#"{"pointer":{"trail":18446744073709551615,"trail_distance":18446744073709551615}}"#).unwrap();
+        assert_eq!((s.pointer.smudge, s.pointer.smudge_distance), (10, 10));
+        // Only the glide time stored: the default curve with that time.
+        let s = from_json(r#"{"voice":{"motion":{"glide_ms":700}}}"#).unwrap();
+        assert_eq!(s.voice.motion.range_end, VoiceGlide { curve: VoiceCurve::Smooth, ms: 700 });
+        assert_eq!(s.voice.motion.pointer, s.voice.motion.range_start);
+    }
+
+    #[test]
+    fn new_keys_win_over_old_ones_beside_them() {
+        let both = r#"{"pointer":{"trail":3,"smudge":1,"trail_distance":9},"voice":{"motion":{"curve":"Spring","glide_ms":900,"pointer":{"curve":"EaseOut","ms":200}}}}"#;
+        let s = from_json(both).unwrap();
+        assert_eq!((s.pointer.smudge, s.pointer.smudge_distance), (1, 9));
+        assert_eq!(s.voice.motion.pointer, VoiceGlide { curve: VoiceCurve::EaseOut, ms: 200 });
+        assert_eq!(s.voice.motion.range_start, VoiceGlide::default(), "the new shape is taken as it is");
+    }
+
+    #[test]
+    fn pointer_and_voice_values_are_clamped() {
+        let s = from_json(
+            r#"{"pointer":{"smudge":99,"smudge_distance":0},"voice":{"ring":200,"far_wait_ms":60000,
+            "pointer":{"smudge":99,"smudge_distance":99},"range":{"border":99,"blur":99},
+            "motion":{"pointer":{"ms":5},"range_start":{"ms":9999},"range_end":{"ms":5},"ayah_fade_delay_ms":60000}}}"#,
+        )
+        .unwrap();
+        assert_eq!((s.pointer.smudge, s.pointer.smudge_distance), (10, 1));
+        assert_eq!((s.voice.pointer.smudge, s.voice.pointer.smudge_distance), (10, 10));
+        assert_eq!((s.voice.ring, s.voice.far_wait_ms, s.voice.range.border, s.voice.range.blur), (40, 20000, 12, 10));
+        let m = &s.voice.motion;
+        assert_eq!((m.pointer.ms, m.range_start.ms, m.range_end.ms, m.ayah_fade_delay_ms), (60, 1500, 60, 10000));
+    }
+
+    #[test]
+    fn every_pointer_and_voice_setting_roundtrips() {
+        let mut s = Settings::default();
+        s.pointer.smudge = 4;
+        s.pointer.smudge_distance = 9;
+        let voice = &mut s.voice;
+        voice.pointer.smudge = 10;
+        voice.pointer.smudge_distance = 1;
+        voice.ring = 33;
+        voice.far_wait_ms = 0;
+        voice.range.border = 12;
+        voice.range.blur = 7;
+        voice.motion.pointer = VoiceGlide { curve: VoiceCurve::Spring, ms: 900 };
+        voice.motion.range_start = VoiceGlide { curve: VoiceCurve::Linear, ms: 1500 };
+        voice.motion.range_end = VoiceGlide { curve: VoiceCurve::EaseInOut, ms: 60 };
+        voice.motion.fade_at_ayah_end = false;
+        voice.motion.ayah_fade_delay_ms = 2500;
+        assert_eq!(from_json(&to_json(&s)), Some(s));
+        assert_eq!(from_json("{}"), Some(Settings::default()));
     }
 
     #[test]

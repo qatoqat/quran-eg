@@ -354,13 +354,14 @@ fn pointer_look(ui: &mut Ui, colors: &Colors, pointer: &mut quran_core::settings
     });
     range(ui, size, &mut pointer.size, sizes, 1, "");
     range(ui, "Opacity", &mut pointer.opacity, 5..=100, 5, "%");
-    range(ui, "Trail", &mut pointer.trail, 0..=10, 1, "");
-    if pointer.trail > 0 {
-        range(ui, "Trail distance", &mut pointer.trail_distance, 1..=10, 1, "");
+    range(ui, "Edge blur", &mut pointer.blur, 0..=10, 1, "");
+    range(ui, "Smudge strength", &mut pointer.smudge, 0..=10, 1, "");
+    if pointer.smudge > 0 {
+        range(ui, "Smudge distance", &mut pointer.smudge_distance, 1..=10, 1, "");
+        help(ui, colors, "Smudge smears the pointer along its path while it moves, like motion blur, and draws back into it when it stops.");
     }
-    range(ui, "Blur", &mut pointer.blur, 0..=10, 1, "");
     range(ui, "Shrink with speed", &mut pointer.shrink, 0..=10, 1, "");
-    range(ui, "Glow (stronger colours under the pointer; blur softens its edge)", &mut pointer.glow, 0..=10, 1, "");
+    range(ui, "Glow (stronger colours under the pointer; edge blur softens its rim)", &mut pointer.glow, 0..=10, 1, "");
 }
 
 /// A slider for a value in milliseconds, shown in seconds.
@@ -377,6 +378,15 @@ fn millis(ui: &mut Ui, label: &str, value: &mut u16, range: std::ops::RangeInclu
     });
 }
 
+/// How one moving part of the voice pointer eases: its curve and its time (desktop only).
+#[cfg(not(target_arch = "wasm32"))]
+fn glide(ui: &mut Ui, colors: &Colors, title: &str, glide: &mut settings::VoiceGlide) {
+    ui.add_space(4.0);
+    ui.label(title);
+    segmented(ui, colors, &mut glide.curve, &crate::voice::CURVES);
+    millis(ui, "Glide time", &mut glide.ms, 60..=1500, 20);
+}
+
 /// The voice pointer: its dot, the accuracy range around it and how it moves (desktop only).
 #[cfg(not(target_arch = "wasm32"))]
 fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
@@ -389,12 +399,24 @@ fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
          the letter being read, inside a range over the words it could be on.",
     );
     check(ui, &mut voice.auto_scroll, "Keep the line being read in view");
+    if voice.auto_scroll {
+        millis(ui, "Wait before following to a far place", &mut voice.far_wait_ms, 0..=20000, 500);
+        help(
+            ui,
+            colors,
+            "Heard far from where you were being followed (another surah, or more than a page away), the place counts as \
+             lost: the pointer hides and the page stays, in case it was a slip or a mishearing. The reader goes there only if \
+             the recitation is still followed there after this long. Reading on, into the next page or surah too, is followed \
+             at once.",
+        );
+    }
     check(ui, &mut voice.stop_on_closing, "Stop listening at \"sadaqa-llahu-l-'azim\"");
     check(ui, &mut voice.pointer.enabled, "Show the pointer");
     if voice.pointer.enabled {
         pointer_look(ui, colors, &mut voice.pointer, "Size (tenths of the text size)", 2..=20);
         if voice.pointer.shape == PointerShape::Ring {
-            range(ui, "Ring line", &mut voice.ring, 1..=20, 1, " pt");
+            range(ui, "Ring line", &mut voice.ring, 1..=40, 1, " pt");
+            help(ui, colors, "A ring keeps its hole: its line is never more than a quarter of its width.");
         }
         range(ui, "Centre above the baseline (tenths of the text size)", &mut voice.lift, 0..=10, 1, "");
     }
@@ -408,18 +430,25 @@ fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
         range(ui, "Width per unsure word (tenths)", &mut r.spread, 5..=30, 1, "");
         range(ui, "Opacity", &mut r.opacity, 0..=100, 2, "%");
         range(ui, "Roundness", &mut r.roundness, 0..=50, 5, "%");
-        range(ui, "Outline", &mut r.border, 0..=4, 1, " pt");
+        range(ui, "Outline", &mut r.border, 0..=12, 1, " pt");
+        range(ui, "Edge blur", &mut r.blur, 0..=10, 1, "");
     }
     ui.add_space(8.0);
     small_caps(ui, colors, "Motion");
     let m = &mut voice.motion;
-    segmented(ui, colors, &mut m.curve, &crate::voice::CURVES);
-    millis(ui, "Glide time", &mut m.glide_ms, 60..=1500, 20);
+    glide(ui, colors, "Pointer", &mut m.pointer);
+    glide(ui, colors, "Range start (the edge behind the pointer)", &mut m.range_start);
+    glide(ui, colors, "Range end (the edge ahead of it)", &mut m.range_end);
     range(ui, "Fade over when going back more than (tenths of a word)", &mut m.fade_back, 3..=50, 1, "");
     range(ui, "Fade over when jumping ahead more than (words)", &mut m.far_jump, 3..=40, 1, "");
     range(ui, "Run ahead at your pace at most (tenths of a word)", &mut m.max_ahead, 0..=30, 1, "");
     millis(ui, "Wait before easing back", &mut m.wait_ms, 0..=5000, 100);
-    check(ui, &mut m.fade_at_ayah_end, "Fade out at ayah ends (experimental)");
+    help(ui, colors, "While the pointer waits, the range reaches back to where you are heard.");
+    check(ui, &mut m.fade_at_ayah_end, "Fade out when you pause at an ayah's end");
+    if m.fade_at_ayah_end {
+        millis(ui, "Fade out after", &mut m.ayah_fade_delay_ms, 0..=10000, 250);
+        help(ui, colors, "0 fades at once. The pointer fades in again wherever you go on.");
+    }
     ui.add_space(8.0);
     small_caps(ui, colors, "Listener");
     ui.add(egui::TextEdit::singleline(&mut voice.listener).hint_text("~/.local/share/quran-voice").desired_width(f32::INFINITY));

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use egui::{Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Rect, Response, Sense, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
+use egui::{Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
 
 use crate::theme::Colors;
 
@@ -117,7 +117,7 @@ pub fn link(ui: &mut Ui, colors: &Colors, text: &str, size: f32) -> Response {
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Icon {
     Search,
     Settings,
@@ -125,7 +125,22 @@ pub enum Icon {
     /// Recording the recitation: a ring, filled red while recording.
     Record,
     /// Following the recitation with the voice pointer: a microphone.
-    Listen,
+    Listen(Mic),
+}
+
+/// The Listen button's microphone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+// (The web build has no listener: its microphone would only ever be off.)
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub enum Mic {
+    Off,
+    /// Joining or starting the listener: a spinner on the rim, this far (0..1) through its turn.
+    Connecting(f32),
+    /// Listening: the disc filled from the bottom to the input's `level` (0..=1), turned as far as
+    /// `loud` (0..=1) to the danger colour.
+    On { level: f32, loud: f32 },
+    /// No audio arriving, or a capture error: the microphone struck through.
+    Trouble,
 }
 
 /// A round icon button; `on` while what it opens is open.
@@ -134,10 +149,19 @@ pub fn icon_button(ui: &mut Ui, colors: &Colors, icon: Icon, on: bool) -> Respon
     let hot = on || response.hovered() || response.has_focus();
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
+        // A microphone that hears turns the danger colour as it gets too loud; one in trouble is dead
+        // (grey) on the danger colour's tint.
+        let ink = match icon {
+            Icon::Listen(Mic::On { loud, .. }) => colors.accent.lerp_to_gamma(colors.danger, loud),
+            Icon::Listen(Mic::Trouble) => colors.muted,
+            _ if hot => colors.accent,
+            _ => colors.muted,
+        };
         if hot {
-            painter.circle_filled(rect.center(), rect.width() / 2.0, colors.accent_tint());
+            let tint = if icon == Icon::Listen(Mic::Trouble) { colors.danger } else { ink };
+            painter.circle_filled(rect.center(), rect.width() / 2.0, Colors::faint(tint, 0.12));
         }
-        let stroke = Stroke::new(1.8, if hot { colors.accent } else { colors.muted });
+        let stroke = Stroke::new(1.8, ink);
         let c = rect.center();
         match icon {
             Icon::Search => {
@@ -165,26 +189,71 @@ pub fn icon_button(ui: &mut Ui, colors: &Colors, icon: Icon, on: bool) -> Respon
                     painter.circle_filled(c, 2.4, stroke.color);
                 }
             }
-            Icon::Listen => {
-                // A capsule on a stand, with the cradle around its lower half.
-                let capsule = egui::Rect::from_center_size(c - vec2(0.0, 2.5), vec2(6.0, 10.0));
-                if on {
-                    painter.rect_filled(capsule, egui::CornerRadius::same(3), stroke.color);
-                } else {
-                    painter.rect_stroke(capsule, egui::CornerRadius::same(3), stroke, egui::StrokeKind::Middle);
-                }
-                let cradle: Vec<egui::Pos2> = (0..=12)
-                    .map(|k| {
-                        let a = std::f32::consts::PI * k as f32 / 12.0;
-                        c + vec2(-6.0 * a.cos(), -1.0 + 6.0 * a.sin())
-                    })
-                    .collect();
-                painter.add(egui::Shape::line(cradle, stroke));
-                painter.line_segment([c + vec2(0.0, 5.0), c + vec2(0.0, 8.0)], stroke);
-            }
+            Icon::Listen(mic) => microphone(painter, colors, c, rect.width() / 2.0, mic, stroke),
         }
     }
     response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// A capsule on a stand, with the cradle around its lower half: filled while listening, over the
+/// liquid of its level; with a spinner on the rim while connecting; struck through in trouble.
+fn microphone(painter: &Painter, colors: &Colors, c: Pos2, r: f32, mic: Mic, stroke: Stroke) {
+    if let Mic::On { level, .. } = mic
+        && let Some(liquid) = liquid(c, r, level, Colors::faint(stroke.color, if colors.dark { 0.34 } else { 0.26 }))
+    {
+        painter.add(liquid);
+    }
+    let capsule = Rect::from_center_size(c - vec2(0.0, 2.5), vec2(6.0, 10.0));
+    if matches!(mic, Mic::On { .. }) {
+        painter.rect_filled(capsule, CornerRadius::same(3), stroke.color);
+    } else {
+        painter.rect_stroke(capsule, CornerRadius::same(3), stroke, StrokeKind::Middle);
+    }
+    let cradle = (0..=12)
+        .map(|k| {
+            let a = std::f32::consts::PI * k as f32 / 12.0;
+            c + vec2(-6.0 * a.cos(), -1.0 + 6.0 * a.sin())
+        })
+        .collect();
+    painter.add(Shape::line(cradle, stroke));
+    painter.line_segment([c + vec2(0.0, 5.0), c + vec2(0.0, 8.0)], stroke);
+    match mic {
+        Mic::Connecting(turn) => {
+            // A quarter of the rim, just inside it, turning clockwise.
+            let start = std::f32::consts::TAU * turn;
+            let arc = (0..=12).map(|k| c + (r - 1.1) * Vec2::angled(start + std::f32::consts::FRAC_PI_2 * k as f32 / 12.0)).collect();
+            painter.add(Shape::line(arc, Stroke::new(2.2, colors.accent)));
+        }
+        Mic::Trouble => {
+            // Cut out of the glyph under it (in the disc's colour on the header), then drawn.
+            let ends = [c + vec2(-7.0, -8.0), c + vec2(7.0, 8.0)];
+            painter.line_segment(ends, Stroke::new(4.6, colors.card.lerp_to_gamma(colors.danger, 0.12)));
+            painter.line_segment(ends, Stroke::new(1.8, colors.danger));
+        }
+        Mic::Off | Mic::On { .. } => {}
+    }
+}
+
+/// The liquid in a disc (centre `c`, radius `r`) filled to `level` (0..=1) from the bottom: the
+/// segment under its surface (a convex polygon, clockwise from the surface's right end), the whole
+/// disc, or nothing.
+fn liquid(c: Pos2, r: f32, level: f32, fill: Color32) -> Option<Shape> {
+    if level < 0.01 {
+        return None;
+    }
+    if level > 0.995 {
+        return Some(Shape::circle_filled(c, r, fill));
+    }
+    // The surface's ends are `theta` either side of the bottom; a point every 1/8 radian or less.
+    let theta = (1.0 - 2.0 * level).acos();
+    let k = 2 + (8.0 * theta) as usize;
+    let points = (0..=k)
+        .map(|i| {
+            let phi = theta - 2.0 * theta * i as f32 / k as f32;
+            c + r * vec2(phi.sin(), phi.cos())
+        })
+        .collect();
+    Some(Shape::convex_polygon(points, fill, Stroke::NONE))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -263,4 +332,28 @@ pub fn tip(ctx: &egui::Context, colors: &Colors, anchor: Rect, lines: &[(&str, b
     painter.rect(rect, CornerRadius::same(6), colors.tip_bg, Stroke::new(1.0, colors.tip_border), StrokeKind::Inside);
     // A centred galley is placed by its middle.
     painter.galley(pos2(centre, rect.top() + 5.5), text, crate::theme::TIP_FG);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_liquid_is_the_segment_of_the_disc_under_its_level() {
+        let (c, r) = (pos2(100.0, 50.0), 17.5);
+        assert!(liquid(c, r, 0.009, Color32::RED).is_none(), "nothing below 1%");
+        assert!(matches!(liquid(c, r, 0.996, Color32::RED), Some(Shape::Circle(_))), "the whole disc near full");
+        for level in [0.01, 0.125, 0.5, 0.75, 0.995] {
+            let Some(Shape::Path(segment)) = liquid(c, r, level, Color32::RED) else { panic!("a segment at {level}") };
+            let points = &segment.points;
+            assert!(points.len() <= 28 && segment.closed);
+            assert!(points.iter().all(|p| (p.distance(c) - r).abs() < 1e-3), "every point on the circle");
+            let surface = c.y + r - 2.0 * r * level;
+            assert!([points[0], points[points.len() - 1]].iter().all(|p| (p.y - surface).abs() < 1e-3));
+            assert!(points.iter().all(|p| p.y >= surface - 1e-3), "nothing above the surface");
+        }
+        let Some(Shape::Path(half)) = liquid(c, r, 0.5, Color32::RED) else { panic!() };
+        let ends = (half.points[0], half.points[half.points.len() - 1]);
+        assert!(ends.0.distance(pos2(c.x + r, c.y)) < 1e-3 && ends.1.distance(pos2(c.x - r, c.y)) < 1e-3);
+    }
 }
