@@ -101,10 +101,11 @@ fn place_block(block: &mut Block, ctx: &egui::Context, env: &Env<'_>, m: &Metric
 impl Reader {
     /// Wheel and keys.
     pub(super) fn scroll_input(&mut self, ui: &Ui, area: Rect) {
-        let view = area.height();
+        let (view, before) = (area.height(), self.scroll);
         if ui.rect_contains_pointer(area) {
             self.scroll -= ui.input(|i| i.smooth_scroll_delta.y);
         }
+        self.touched = self.scroll != before;
         if ui.ctx().egui_wants_keyboard_input() {
             return;
         }
@@ -127,6 +128,7 @@ impl Reader {
             step
         });
         self.scroll = (self.scroll + step).max(0.0);
+        self.touched = self.scroll != before;
         // (`End` is brought back to the last page by the clamp that follows placement.)
         if self.scroll.is_infinite() {
             self.scroll = self.top_height + self.blocks.iter().map(|b| b.height).sum::<f32>() + self.bottom_height;
@@ -158,9 +160,13 @@ impl Reader {
             })
         };
         let verse_key = target.verse_key();
-        let Some((index, item)) = find(&|c| c.location == location).or_else(|| find(&|c| c.verse_key == verse_key)) else {
+        let Some((index, mut item)) = find(&|c| c.location == location).or_else(|| find(&|c| c.verse_key == verse_key)) else {
             return;
         };
+        if std::mem::take(&mut self.head) {
+            let head = |i: &Item| matches!(i, Item::SurahHeader { chapter } | Item::Bismillah { chapter } if *chapter == target.chapter);
+            item = self.blocks[index].page.items[..item].iter().position(head).unwrap_or(item);
+        }
         let set = FontSet::of(env.settings.mushaf_font);
         place_block(&mut self.blocks[index], ctx, env, m, set);
         let above: f32 = self.blocks[..index].iter().map(|b| b.height).sum();
@@ -289,7 +295,8 @@ impl Reader {
     pub(super) fn release_far(&mut self, env: &mut Env<'_>, view: f32) {
         let view_top = self.scroll - self.top_height;
         let set = FontSet::of(env.settings.mushaf_font);
-        let mut keep: Vec<u16> = Vec::new();
+        // Page 1's font (a few dozen kB) draws every Bismillah line and the voice pointer's preview: kept.
+        let mut keep: Vec<u16> = vec![1];
         let mut top = 0.0;
         for block in &mut self.blocks {
             let bottom = top + block.height;
@@ -297,9 +304,6 @@ impl Reader {
                 block.release();
             } else {
                 keep.extend(block.page.page);
-                if block.has_bismillah() {
-                    keep.push(1);
-                }
             }
             top = bottom;
         }

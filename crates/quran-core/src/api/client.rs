@@ -7,6 +7,9 @@
 //! `fetch` and gives the answer to [`Call::read`].
 
 use super::{DEFAULT_BASE_URL, query::VerseQuery, types::*};
+use crate::integrity::words_structurally_ok;
+use crate::offline::whole;
+use crate::parse::{CHAPTER_COUNT, JUZ_COUNT};
 use serde::de::DeserializeOwned;
 
 #[derive(Debug, thiserror::Error)]
@@ -21,11 +24,13 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// One request to the API: where it goes and how its answer is read.
+/// One request to the API: where it goes, how its answer is read, and which answers may be kept for reading offline.
 #[derive(Debug, Clone)]
 pub struct Call<T> {
     pub url: String,
     parse: fn(&str) -> Result<T>,
+    /// What an answer must be to be kept (whole: every verse, every surah); `None`: answers are not kept (a search's).
+    keep: Option<fn(&T) -> bool>,
 }
 
 impl<T> Call<T> {
@@ -37,6 +42,21 @@ impl<T> Call<T> {
         }
         (self.parse)(&body)
     }
+
+    /// Whether its answers are ever kept.
+    pub fn keeping(&self) -> bool {
+        self.keep.is_some()
+    }
+
+    /// Whether this answer may be kept.
+    pub fn keeps(&self, answer: &T) -> bool {
+        self.keep.is_some_and(|keep| keep(answer))
+    }
+}
+
+/// Any answer that could be read.
+fn read_at_all<T>(_: &T) -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -86,61 +106,65 @@ impl Client {
         url
     }
 
-    fn call<T>(&self, path: &str, query: &[(&str, String)], parse: fn(&str) -> Result<T>) -> Call<T> {
-        Call { url: self.url(path, query), parse }
+    fn call<T>(&self, path: &str, query: &[(&str, String)], parse: fn(&str) -> Result<T>, keep: Option<fn(&T) -> bool>) -> Call<T> {
+        Call { url: self.url(path, query), parse, keep }
     }
 
     /// All 114 chapters, names translated into `language`.
     pub fn chapters_call(&self, language: &str) -> Call<Vec<Chapter>> {
-        self.call("/chapters", &[("language", language.into())], |b| Ok(parse_json::<ChaptersResponse>(b)?.chapters))
+        let every = |list: &Vec<Chapter>| list.len() == usize::from(CHAPTER_COUNT);
+        self.call("/chapters", &[("language", language.into())], |b| Ok(parse_json::<ChaptersResponse>(b)?.chapters), Some(every))
     }
 
     pub fn chapter_call(&self, id: u16, language: &str) -> Call<Chapter> {
         let query = [("language", language.into())];
-        self.call(&format!("/chapters/{id}"), &query, |b| Ok(parse_json::<ChapterResponse>(b)?.chapter))
+        self.call(&format!("/chapters/{id}"), &query, |b| Ok(parse_json::<ChapterResponse>(b)?.chapter), Some(read_at_all))
     }
 
     pub fn verses_by_chapter_call(&self, chapter: u16, q: &VerseQuery) -> Call<VersesResponse> {
-        self.call(&format!("/verses/by_chapter/{chapter}"), &q.to_pairs(), parse_json)
+        self.call(&format!("/verses/by_chapter/{chapter}"), &q.to_pairs(), parse_json, Some(whole))
     }
 
     pub fn verses_by_page_call(&self, page: u16, q: &VerseQuery) -> Call<VersesResponse> {
-        self.call(&format!("/verses/by_page/{page}"), &q.to_pairs(), parse_json)
+        self.call(&format!("/verses/by_page/{page}"), &q.to_pairs(), parse_json, Some(whole))
     }
 
     pub fn verses_by_juz_call(&self, juz: u8, q: &VerseQuery) -> Call<VersesResponse> {
-        self.call(&format!("/verses/by_juz/{juz}"), &q.to_pairs(), parse_json)
+        self.call(&format!("/verses/by_juz/{juz}"), &q.to_pairs(), parse_json, Some(whole))
     }
 
     /// Single verse, `key` like `"2:255"`.
     pub fn verse_by_key_call(&self, key: &str, q: &VerseQuery) -> Call<Verse> {
-        self.call(&format!("/verses/by_key/{key}"), &q.to_pairs(), |b| Ok(parse_json::<VerseResponse>(b)?.verse))
+        self.call(&format!("/verses/by_key/{key}"), &q.to_pairs(), |b| Ok(parse_json::<VerseResponse>(b)?.verse), Some(words_structurally_ok))
     }
 
     pub fn juzs_call(&self) -> Call<Vec<Juz>> {
-        self.call("/juzs", &[], |b| Ok(parse_json::<JuzsResponse>(b)?.juzs))
+        // (The API has been known to list a juz twice: each must be there.)
+        let every = |list: &Vec<Juz>| (1..=JUZ_COUNT).all(|n| list.iter().any(|j| j.juz_number == n));
+        self.call("/juzs", &[], |b| Ok(parse_json::<JuzsResponse>(b)?.juzs), Some(every))
     }
 
     /// Available translations; names localized into `language`.
     pub fn translations_call(&self, language: &str) -> Call<Vec<TranslationResource>> {
         let query = [("language", language.into())];
-        self.call("/resources/translations", &query, |b| Ok(parse_json::<TranslationsResponse>(b)?.translations))
+        self.call("/resources/translations", &query, |b| Ok(parse_json::<TranslationsResponse>(b)?.translations), Some(|list| !list.is_empty()))
     }
 
     pub fn languages_call(&self, language: &str) -> Call<Vec<Language>> {
         let query = [("language", language.into())];
-        self.call("/resources/languages", &query, |b| Ok(parse_json::<LanguagesResponse>(b)?.languages))
+        self.call("/resources/languages", &query, |b| Ok(parse_json::<LanguagesResponse>(b)?.languages), Some(|list| !list.is_empty()))
     }
 
     pub fn footnote_call(&self, id: u32) -> Call<FootNote> {
-        self.call(&format!("/foot_notes/{id}"), &[], |b| Ok(parse_json::<FootNoteResponse>(b)?.foot_note))
+        self.call(&format!("/foot_notes/{id}"), &[], |b| Ok(parse_json::<FootNoteResponse>(b)?.foot_note), Some(read_at_all))
     }
 
     /// Full-text search. `page` is 1-based.
     pub fn search_call(&self, query: &str, size: u32, page: u32, language: &str) -> Call<Search> {
         let query =
             [("q", query.into()), ("size", size.to_string()), ("page", page.to_string()), ("language", language.into())];
-        self.call("/search", &query, |b| Ok(parse_json::<SearchResponse>(b)?.search))
+        // Searches are not kept.
+        self.call("/search", &query, |b| Ok(parse_json::<SearchResponse>(b)?.search), None)
     }
 }
 
@@ -244,6 +268,20 @@ mod tests {
             c.url("/search", &[("q", "light & dark".into()), ("size", "5".into())]),
             "https://example.com/api/v4/search?q=light%20%26%20dark&size=5"
         );
+    }
+
+    #[test]
+    fn whole_answers_are_kept_and_searches_never() {
+        let c = Client::default();
+        assert!(!c.search_call("light", 5, 1, "en").keeping());
+        let chapters = c.chapters_call("en");
+        assert!(chapters.keeping() && !chapters.keeps(&Vec::new()));
+        let juzs = c.juzs_call();
+        let juz = |n: u8| Juz { id: n.into(), juz_number: n, verse_mapping: Default::default(), first_verse_id: None, last_verse_id: None, verses_count: None };
+        // Listed twice over, as the API has done, they are all there; one short, not.
+        let twice: Vec<Juz> = (1..=30).chain(1..=30).map(juz).collect();
+        assert!(juzs.keeps(&twice) && !juzs.keeps(&twice[1..30].to_vec()));
+        assert!(c.footnote_call(1).keeping() && !c.translations_call("en").keeps(&Vec::new()));
     }
 
     #[test]

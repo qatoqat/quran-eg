@@ -3,15 +3,18 @@
 //! been followed well, is followed after a second. A far one (another surah, more than about a page
 //! away) is taken first for a slip or the listener's mistake: the pointer hides and the page stays, and
 //! the reader goes there only once the recitation has kept being followed there, reading on, for the
-//! set time. Places are compared by their index in the whole Quran, so surah borders need no special
-//! case.
+//! set time, counted down in a toast that lets them go at once or stay. A far place that sounds like
+//! the ayah being read (a look-alike) waits for their word. After the reader moved the view themselves
+//! (turned a page, opened another surah), every place off screen is far, until the recitation is
+//! followed on their view: the pointer never undoes their move without a countdown. Places are compared
+//! by their index in the whole Quran, so surah borders need no special case.
 
 use super::link::Loc;
 
 /// Seconds surely locked on screen before that place is where the recitation is being followed.
 const HOME_AFTER: f64 = 2.0;
 /// Seconds any place must be off screen before the reader goes there.
-const AWAY: f64 = 1.0;
+pub const AWAY: f64 = 1.0;
 /// Words behind and ahead of the place being followed that are near it: about a mushaf page (80
 /// back keeps al-Ikhlas near the end of an-Nas).
 const BACK: u32 = 80;
@@ -19,9 +22,11 @@ const AHEAD: u32 = 150;
 /// Words back and on from the last place heard there that still continue a far place's run.
 const RUN: (u32, u32) = (3, 30);
 /// Words a far place's run must have advanced before the reader is taken there.
-const ADVANCE: u32 = 3;
+pub const ADVANCE: u32 = 3;
 /// Seconds a far place may go unheard and still continue its run.
 const STALE: f64 = 3.0;
+/// The least countdown after the reader moved the view themselves, so it can be stopped even without a far wait.
+pub const CHOSEN_WAIT: f64 = 3.0;
 
 /// Where the recitation was being followed on screen.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -43,6 +48,18 @@ pub struct Stray {
     first: u32,
     word: u32,
     heard: f64,
+    /// It sounds like the ayah being read: never taken there without the reader's word.
+    pub alike: bool,
+    /// The reader chose to stay.
+    declined: bool,
+}
+
+/// Where the reader may be taken, shown as a toast: the far place, and the seconds left (`None`: a look-alike, which
+/// waits for the reader's word).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Offer {
+    pub to: Loc,
+    pub left: Option<f32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +80,8 @@ pub struct Pages {
     stray: Option<Stray>,
     /// Since when the place heard has been off screen.
     away_since: Option<f64>,
+    /// The first word of the view the reader moved to themselves, until the recitation is followed on it.
+    chosen: Option<Loc>,
 }
 
 impl Pages {
@@ -73,6 +92,7 @@ impl Pages {
         if !sure {
             return None;
         }
+        self.chosen = None;
         if now - *self.streak.get_or_insert(now) >= HOME_AFTER {
             self.home = Some(Home { word, loc });
         }
@@ -84,32 +104,70 @@ impl Pages {
         self.streak = None;
     }
 
+    /// The reader is at `loc` (word `word`), taken there as where the recitation goes on (the surah a basmala opens):
+    /// what is heard far from it is far.
+    pub fn arrive(&mut self, word: u32, loc: Loc) {
+        (self.home, self.stray, self.chosen, self.away_since) = (Some(Home { word, loc }), None, None, None);
+    }
+
+    /// The reader moved the view themselves, to one that starts at `first`.
+    pub fn chosen(&mut self, first: Loc) {
+        (self.chosen, self.home, self.stray, self.away_since) = (Some(first), None, None, None);
+    }
+
     /// The place heard is not on screen. `wait`: seconds a far place must keep being followed before
-    /// the reader goes there.
-    pub fn off_screen(&mut self, word: u32, loc: Loc, sure: bool, now: f64, wait: f64) -> Verdict {
+    /// the reader goes there; `alike`: it sounds like the ayah being read (taken where a run starts).
+    pub fn off_screen(&mut self, word: u32, loc: Loc, sure: bool, now: f64, wait: f64, alike: bool) -> Verdict {
         self.streak = None;
         let away = now - *self.away_since.get_or_insert(now);
         if !sure {
             return if self.stray.is_some() { Verdict::Stray } else { Verdict::Wait };
         }
+        let wait = self.wait(wait);
         let far = self.home.filter(|home| wait > 0.0 && (word + BACK < home.word || word > home.word + AHEAD));
-        let Some(home) = far else {
+        let Some(from) = self.chosen.or(far.map(|home| home.loc)) else {
             self.stray = None;
             return self.go_if(away >= AWAY);
         };
         let s = match self.stray {
             Some(s) if word + RUN.0 >= s.word && word <= s.word + RUN.1 && now - s.heard <= STALE => s,
             // Somewhere else: a new run, and the clock starts again.
-            _ => Stray { from: home.loc, to: loc, since: now, first: word, word, heard: now },
+            _ => Stray { from, to: loc, since: now, first: word, word, heard: now, alike, declined: false },
         };
-        self.stray = Some(Stray { to: loc, word, heard: now, ..s });
-        if now - s.since >= wait.max(AWAY) && word >= s.first + ADVANCE {
+        // (Whether it sounds like the ayah being read is told where the listener went: further on, the run's words
+        // come to any word.)
+        let s = Stray { to: loc, word, heard: now, ..s };
+        self.stray = Some(s);
+        if !s.alike && !s.declined && now - s.since >= wait.max(AWAY) && word >= s.first + ADVANCE {
             // The reader really went on there.
-            self.home = None;
-            self.stray = None;
-            return self.go_if(true);
+            return self.go();
         }
         Verdict::Stray
+    }
+
+    /// The reader is taken to the far place now (its countdown ran out, or they chose to go).
+    pub fn go(&mut self) -> Verdict {
+        (self.home, self.stray, self.chosen) = (None, None, None);
+        self.go_if(true)
+    }
+
+    /// The reader chose to stay: the far place heard is not followed (a run elsewhere is offered anew).
+    pub fn decline(&mut self) {
+        if let Some(s) = &mut self.stray {
+            s.declined = true;
+        }
+    }
+
+    /// The far place to offer the reader, once it has been heard for a second and lately.
+    pub fn offer(&self, now: f64, wait: f64) -> Option<Offer> {
+        let s = self.stray.filter(|s| !s.declined && now - s.since >= AWAY && now - s.heard <= STALE)?;
+        let left = (s.since + self.wait(wait).max(AWAY) - now).max(0.0) as f32;
+        Some(Offer { to: s.to, left: (!s.alike).then_some(left) })
+    }
+
+    /// The wait for a far place: at least a countdown that can be stopped once the reader chose the view.
+    fn wait(&self, wait: f64) -> f64 {
+        if self.chosen.is_some() { wait.max(CHOSEN_WAIT) } else { wait }
     }
 
     fn go_if(&mut self, go: bool) -> Verdict {
@@ -154,7 +212,7 @@ mod tests {
         let mut k = 0;
         while f64::from(k) * 0.32 <= secs {
             let now = t + f64::from(k) * 0.32;
-            out.push((now, pages.off_screen(word + k * step, (30, 12, 1), sure, now, 5.0)));
+            out.push((now, pages.off_screen(word + k * step, (30, 12, 1), sure, now, 5.0, false)));
             k += 1;
         }
         out
@@ -163,15 +221,15 @@ mod tests {
     #[test]
     fn with_nothing_followed_yet_any_place_goes_after_a_second() {
         let mut pages = Pages::default();
-        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 0.0, 5.0), Verdict::Wait);
+        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 0.0, 5.0, false), Verdict::Wait);
         assert_eq!(pages.wake(0.4), Some(0.6));
-        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 1.01, 5.0), Verdict::Go);
+        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 1.01, 5.0, false), Verdict::Go);
         // Less than 2 s followed on screen is not yet a home.
         let mut pages = Pages::default();
         pages.on_screen(HOME.0, HOME.1, true, 0.0);
         pages.on_screen(HOME.0, HOME.1, true, 1.5);
-        pages.off_screen(50_000, (60, 1, 1), true, 1.8, 5.0);
-        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 2.9, 5.0), Verdict::Go);
+        pages.off_screen(50_000, (60, 1, 1), true, 1.8, 5.0, false);
+        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 2.9, 5.0, false), Verdict::Go);
     }
 
     #[test]
@@ -197,20 +255,20 @@ mod tests {
         assert!(heard(&mut pages, 40_000, 0, true, t, 8.0).iter().all(|(_, v)| *v == Verdict::Stray));
         // Unsure (paused, drifting, low confidence): lost, never taken there.
         let (mut pages, t) = followed(0.0);
-        pages.off_screen(40_000, (30, 12, 1), true, t, 5.0);
+        pages.off_screen(40_000, (30, 12, 1), true, t, 5.0, false);
         assert!(heard(&mut pages, 40_001, 1, false, t + 0.32, 8.0).iter().all(|(_, v)| *v == Verdict::Stray));
         // Hopping from one far place to another: the clock starts again each time.
         let (mut pages, t) = followed(0.0);
         for k in 0..30 {
             let now = t + f64::from(k) * 0.32;
             let word = if k % 2 == 0 { 40_000 + k } else { 60_000 + k };
-            assert_eq!(pages.off_screen(word, (30, 12, 1), true, now, 5.0), Verdict::Stray, "{k}");
+            assert_eq!(pages.off_screen(word, (30, 12, 1), true, now, 5.0, false), Verdict::Stray, "{k}");
         }
         // A run not heard for over 3 s is over: the next place there starts a new one.
         let (mut pages, t) = followed(0.0);
         heard(&mut pages, 40_000, 1, true, t, 3.0);
         let late = t + 3.0 + STALE + 0.5;
-        assert_eq!(pages.off_screen(40_012, (30, 12, 1), true, late, 5.0), Verdict::Stray);
+        assert_eq!(pages.off_screen(40_012, (30, 12, 1), true, late, 5.0, false), Verdict::Stray);
         assert_eq!(pages.stray().unwrap().since, late);
     }
 
@@ -230,19 +288,58 @@ mod tests {
     fn reading_on_or_stepping_back_near_is_followed_after_a_second() {
         for (word, why) in [(HOME.0 + 40, "the next page"), (HOME.0 + 1, "the next surah"), (HOME.0 - 30, "a few lines back")] {
             let (mut pages, t) = followed(0.0);
-            assert_eq!(pages.off_screen(word, (21, 1, 1), true, t, 5.0), Verdict::Wait, "{why}");
-            assert_eq!(pages.off_screen(word, (21, 1, 1), true, t + 1.1, 5.0), Verdict::Go, "{why}");
+            assert_eq!(pages.off_screen(word, (21, 1, 1), true, t, 5.0, false), Verdict::Wait, "{why}");
+            assert_eq!(pages.off_screen(word, (21, 1, 1), true, t + 1.1, 5.0, false), Verdict::Go, "{why}");
         }
         // Without a wait every place is as near.
         let (mut pages, t) = followed(0.0);
-        pages.off_screen(60_000, (60, 1, 1), true, t, 0.0);
-        assert_eq!(pages.off_screen(60_000, (60, 1, 1), true, t + 1.1, 0.0), Verdict::Go);
+        pages.off_screen(60_000, (60, 1, 1), true, t, 0.0, false);
+        assert_eq!(pages.off_screen(60_000, (60, 1, 1), true, t + 1.1, 0.0, false), Verdict::Go);
         // al-Ikhlas (112:1:1, word 77371) from the end of an-Nas (114:6:3, word 77428).
         let mut pages = Pages::default();
         for k in 0..8 {
             pages.on_screen(77_428, (114, 6, 3), true, f64::from(k) * 0.32);
         }
-        pages.off_screen(77_371, (112, 1, 1), true, 3.0, 5.0);
-        assert_eq!(pages.off_screen(77_371, (112, 1, 1), true, 4.1, 5.0), Verdict::Go);
+        pages.off_screen(77_371, (112, 1, 1), true, 3.0, 5.0, false);
+        assert_eq!(pages.off_screen(77_371, (112, 1, 1), true, 4.1, 5.0, false), Verdict::Go);
+    }
+
+    #[test]
+    fn after_the_readers_own_move_every_place_off_screen_is_far_and_counted_down() {
+        // Followed at home, the reader turns the page; the listener still hears the page before (near home, which
+        // would be followed after a second): lost instead, and offered with a countdown of at least 3 s.
+        let (mut pages, t) = followed(0.0);
+        pages.chosen((20, 60, 1));
+        let verdicts = heard(&mut pages, HOME.0 + 2, 1, true, t, 2.0);
+        assert!(verdicts.iter().all(|(_, v)| *v == Verdict::Stray), "{verdicts:?}");
+        let offer = pages.offer(t + 2.0, 0.0).unwrap();
+        assert_eq!((offer.to, offer.left.map(|l| (l * 10.0).round())), ((30, 12, 1), Some(10.0)));
+        assert_eq!(pages.off_screen(HOME.0 + 12, (30, 12, 1), true, t + 3.0, 0.0, false), Verdict::Go, "the countdown over");
+        // Followed on the reader's view: back to normal.
+        let (mut pages, t) = followed(0.0);
+        pages.chosen((20, 60, 1));
+        pages.on_screen(HOME.0 + 300, (20, 60, 2), true, t);
+        pages.off_screen(HOME.0 + 301, (20, 60, 3), true, t + 0.3, 5.0, false);
+        assert_eq!(pages.off_screen(HOME.0 + 301, (20, 60, 3), true, t + 1.4, 5.0, false), Verdict::Go);
+    }
+
+    #[test]
+    fn a_look_alike_or_a_declined_place_is_never_followed_by_itself() {
+        for decline in [false, true] {
+            let (mut pages, t) = followed(0.0);
+            pages.off_screen(40_000, (30, 12, 1), true, t, 5.0, !decline);
+            if decline {
+                pages.decline();
+            }
+            let verdicts = heard(&mut pages, 40_001, 1, true, t + 0.32, 10.0);
+            assert!(verdicts.iter().all(|(_, v)| *v == Verdict::Stray), "decline {decline}");
+            let offer = pages.offer(t + 2.0, 5.0);
+            assert_eq!(offer.map(|o| o.left), if decline { None } else { Some(None) }, "a look-alike waits for the reader's word");
+        }
+        // Chosen at the toast: gone there at once.
+        let (mut pages, t) = followed(0.0);
+        pages.off_screen(40_000, (30, 12, 1), true, t, 5.0, true);
+        assert_eq!(pages.go(), Verdict::Go);
+        assert!(pages.stray().is_none() && pages.offer(t + 2.0, 5.0).is_none());
     }
 }

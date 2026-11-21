@@ -67,6 +67,12 @@ pub struct App {
     /// Following the recitation with the voice pointer (header button).
     #[cfg(not(target_arch = "wasm32"))]
     voice: Option<crate::voice::Voice>,
+    /// The voice pointer turning to another place: a fade, and the view it goes to loading out of sight.
+    #[cfg(not(target_arch = "wasm32"))]
+    turn: crate::turn::Turn,
+    /// Saving for reading offline: the first run's offer and the progress (desktop only).
+    #[cfg(not(target_arch = "wasm32"))]
+    offline: crate::offline::Offline,
     /// A note for the title bar (a recording saved, the listener stopped) until a time.
     note: Option<(String, f64)>,
 }
@@ -114,6 +120,10 @@ impl App {
             recorder: None,
             #[cfg(not(target_arch = "wasm32"))]
             voice: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            turn: Default::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            offline: Default::default(),
             note: None,
             settings,
         };
@@ -179,6 +189,11 @@ impl App {
 
     /// Go to a view, at a reading position if the location has one.
     fn go(&mut self, ctx: &egui::Context, to: Location) {
+        self.go_into(ctx, to, None);
+    }
+
+    /// Go to a view, in `loaded` if it is that view loaded already (out of sight, for the voice pointer).
+    fn go_into(&mut self, ctx: &egui::Context, to: Location, loaded: Option<Reader>) {
         self.search.close();
         // Already there (the toggle's own button on a page view, a link to this view):
         // nothing is loaded again; a position in it is scrolled to.
@@ -194,7 +209,13 @@ impl App {
         }
         self.results = None;
         self.view = to.view;
-        self.reader = Reader::open(to.view, to.at, ctx, &self.env());
+        self.reader = match loaded.filter(|r| r.view == to.view) {
+            Some(mut reader) => {
+                reader.go_to(to.at);
+                Some(reader)
+            }
+            None => Reader::open(to.view, to.at, ctx, &self.env()),
+        };
         if self.view != View::SurahList {
             self.lists.release();
         }
@@ -357,13 +378,17 @@ impl App {
         }
     }
 
-    /// The voice pointer's frame, after the reader has painted: it draws itself and steers the reader
-    /// (scrolling along, or going to the place being read). Returns a view to open, if it must.
+    /// The voice pointer's frame, after the reader has painted: it draws itself and steers the reader, scrolling along
+    /// or asking for a move to the place being read: in this view, or in the view of the mode the reader reads in that
+    /// holds it (a page for a page), with the surah whose head to show there (a basmala leading into it).
     #[cfg(not(target_arch = "wasm32"))]
-    fn follow_voice(&mut self, ctx: &egui::Context, ground: egui::Rect, now: f64) -> Option<Location> {
+    fn follow_voice(&mut self, ctx: &egui::Context, ground: egui::Rect, now: f64, touched: bool) -> Option<crate::turn::Move> {
+        let opacity = self.turn.opacity(now);
         let voice = self.voice.as_mut()?;
+        voice.set_opacity(opacity);
         let words = self.reader.as_ref().filter(|_| self.results.is_none()).map_or(&[][..], |r| &r.words[..]);
-        let steer = voice.frame(ctx, &self.settings.voice, &self.colors, words, ground);
+        let touched = touched || self.reader.as_ref().is_some_and(|r| r.touched);
+        let steer = voice.frame(ctx, &self.settings.voice, &self.colors, &self.chapters.items, words, ground, touched);
         if steer.closed && self.settings.voice.stop_on_closing {
             self.note = Some(("Listening stopped: sadaqa-llahu-l-'azim".into(), now + 5.0));
             self.voice = None;
@@ -375,13 +400,65 @@ impl App {
         if steer.scroll != 0.0 {
             reader.scroll_by(steer.scroll);
         }
-        let at = steer.go_to?;
-        let same_surah = matches!(self.view, View::Surah { chapter, .. } if chapter == at.chapter);
-        if same_surah || reader.has_verse(&format!("{}:{}", at.chapter, at.verse)) {
-            reader.go_to(Some(at));
-            None
-        } else {
-            Some(View::surah(at.chapter).at(Some(at)))
+        let (at, head) = match (steer.lead, steer.go_to) {
+            (Some(chapter), _) => (quran_core::view::WordRef { chapter, verse: 1, word: 1 }, Some(chapter)),
+            (None, Some(at)) => (at, None),
+            (None, None) => return None,
+        };
+        // In this view (a surah's or a juz's loads up to it), or the view of the same mode that holds it.
+        let here = match self.view {
+            View::Surah { chapter, .. } => chapter == at.chapter,
+            View::Juz(juz) => quran_core::lists::juz_of(&self.juzs.items, at.chapter, at.verse) == Some(juz),
+            _ => false,
+        };
+        let view = if here || reader.has_word(at) { self.view } else { self.view.holding(at, &self.juzs.items) };
+        Some(crate::turn::Move { to: view.at(Some(at)), head })
+    }
+
+    /// The voice pointer's part in the frame: its move faded through (the view it goes to loading out of sight
+    /// meanwhile), and the next page loading while the reader is on a page's last lines. `go`: where the reader went
+    /// themselves, which calls off a move.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn voice_moves(&mut self, ctx: &egui::Context, ground: egui::Rect, now: f64, go: bool) {
+        if go {
+            self.turn.cancel();
+        }
+        let asked = self.follow_voice(ctx, ground, now, go).filter(|_| !go);
+        if self.voice.is_none() && !self.turn.going() {
+            self.turn.cancel();
+        }
+        let mut turn = std::mem::take(&mut self.turn);
+        match asked {
+            // The view just come in, not yet showing the place: the same move, made at once.
+            Some(to) if to.to.view == self.view && turn.settling(now) => self.arrive(to),
+            Some(to) => turn.start(to, self.view, now, ctx, &self.env()),
+            None => {}
+        }
+        if let (View::Page(n), Some(voice), Some(reader)) = (self.view, &self.voice, &self.reader)
+            && n < quran_core::nav::PAGE_COUNT
+            && voice.seen().is_some_and(|at| reader.on_last_lines(at, 2))
+        {
+            turn.preload(View::Page(n + 1), ctx, &self.env());
+        }
+        let due = turn.due(now);
+        let fading = turn.fading(now);
+        self.turn = turn;
+        if let Some((to, loaded)) = due {
+            self.go_into(ctx, to.to, loaded);
+            self.arrive(to);
+        }
+        if fading {
+            ctx.request_repaint();
+        }
+    }
+
+    /// The voice pointer's move, in the view it goes to (shown): at its place, or a surah's head.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn arrive(&mut self, to: crate::turn::Move) {
+        let Some(reader) = &mut self.reader else { return };
+        match to.head {
+            Some(chapter) => reader.go_to_head(chapter),
+            None => reader.go_to(to.to.at),
         }
     }
 
@@ -526,7 +603,16 @@ impl App {
         }
 
         let mut retry = false;
+        // Fading for the voice pointer's move, and the view it goes to loading out of sight.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (opacity, mut unseen) = (self.turn.opacity(now), self.turn.loading());
+        #[cfg(not(target_arch = "wasm32"))]
+        self.fonts.pin(unseen.as_ref().map_or_else(|| self.turn.pages(), crate::reader::Reader::pages));
         egui::CentralPanel::default().frame(egui::Frame::new().fill(self.colors.bg)).show(ui, |ui| {
+            #[cfg(not(target_arch = "wasm32"))]
+            let whole = ui.max_rect();
+            #[cfg(not(target_arch = "wasm32"))]
+            ui.multiply_opacity(opacity);
             let (loading, errors) = (
                 (self.chapters.loading(), self.juzs.loading()),
                 (self.chapters.error.clone(), self.juzs.error.clone()),
@@ -545,26 +631,46 @@ impl App {
                 (None, View::JuzList) => lists::juzs(ui, &env, loading.1, errors.1.as_deref(), &mut retry),
                 (None, _) => reader.as_mut().and_then(|r| r.ui(ui, &mut env)),
             };
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(next) = unseen.as_mut() {
+                // Drawn unseen and untouchable: it lays itself out and asks for its glyphs.
+                let mut hidden = ui.new_child(egui::UiBuilder::new().max_rect(whole).invisible());
+                next.ui(&mut hidden, &mut env);
+            }
             self.reader = reader;
             self.results = results;
             self.lists = lists;
             go = go.or(opened);
         });
+        #[cfg(not(target_arch = "wasm32"))]
+        self.turn.loaded(unseen);
 
         if self.settings_open {
             let screen = ctx.content_rect();
-            if self.panel.show(&ctx, screen, &mut self.settings, &self.colors, &self.client) {
+            let page_em = line_height / settings::MUSHAF_LINE;
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                self.panel.listener = self.voice.as_ref().and_then(|v| v.lacks(&self.settings.voice, now));
+            }
+            if self.panel.show(&ctx, screen, &mut self.settings, &self.colors, &self.client, &mut self.fonts, page_em) {
                 self.settings_open = false;
             }
+            self.settings_changed(&ctx);
+        } else {
+            self.panel.closed();
+        }
+        // The offer to save for reading offline, and its progress, near the foot of the reading area.
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.offline.toast(&ctx, ground, &mut self.settings, &self.colors, &self.client, self.settings_open) {
             self.settings_changed(&ctx);
         }
         if retry {
             self.load_lists(&ctx);
         }
+        // The reader going elsewhere themselves (a list, the search, a page's number) moves the view as a page turn does;
+        // the pointer's own move is theirs to override.
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(to) = self.follow_voice(&ctx, ground, now) {
-            go = go.or(Some(to));
-        }
+        self.voice_moves(&ctx, ground, now, go.is_some());
         if let Some(to) = go {
             self.open(&ctx, to);
             ctx.request_repaint();
@@ -578,7 +684,7 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let mut frames = std::mem::take(&mut self.frames);
-        frames.time(|| self.frame(ui));
+        frames.time(&ui.ctx().clone(), || self.frame(ui));
         self.frames = frames;
         crate::stats::milestone("first-frame");
     }

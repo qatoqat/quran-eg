@@ -10,6 +10,7 @@
 //! - `task`, `net`: work and requests off the frame (threads natively, a queue and `fetch` in a browser).
 //! - `web` (web build only): the address bar, history and tab title.
 //! - `recorder`, `voice` (desktop only): recording the recitation, and the voice pointer that follows it.
+//! - `offline` (desktop only): the copy of the API's answers kept for reading offline.
 
 mod app;
 mod arabic;
@@ -19,6 +20,8 @@ mod header;
 mod kit;
 mod lists;
 mod net;
+#[cfg(not(target_arch = "wasm32"))]
+mod offline;
 mod pointer;
 mod reader;
 #[cfg(not(target_arch = "wasm32"))]
@@ -30,6 +33,8 @@ mod sheet;
 mod stats;
 mod task;
 mod theme;
+#[cfg(not(target_arch = "wasm32"))]
+mod turn;
 #[cfg(not(target_arch = "wasm32"))]
 mod voice;
 

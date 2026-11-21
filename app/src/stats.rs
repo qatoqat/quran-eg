@@ -63,13 +63,18 @@ pub struct Frames {
     total: f64,
     longest: f64,
     since: Option<Instant>,
+    /// What asked for the frames since (egui's record of the calls, by file and line), and how often.
+    causes: std::collections::BTreeMap<String, u32>,
 }
 
 impl Frames {
-    /// Time one frame.
-    pub fn time<R>(&mut self, frame: impl FnOnce() -> R) -> R {
+    /// Time one frame, and note what asked for it.
+    pub fn time<R>(&mut self, ctx: &egui::Context, frame: impl FnOnce() -> R) -> R {
         if cfg!(target_arch = "wasm32") || !on() {
             return frame();
+        }
+        for cause in ctx.repaint_causes() {
+            *self.causes.entry(format!("{}:{}", cause.file.rsplit('/').next().unwrap_or(cause.file), cause.line)).or_default() += 1;
         }
         let began = Instant::now();
         let result = frame();
@@ -80,7 +85,10 @@ impl Frames {
         let since = *self.since.get_or_insert(began);
         if since.elapsed().as_secs_f64() >= 1.0 {
             let (count, average) = (self.count, self.total / f64::from(self.count));
-            note(|| format!("frames: {count} in the last second, {average:.2} ms each on average, longest {:.2} ms", self.longest));
+            let mut causes: Vec<_> = self.causes.iter().collect();
+            causes.sort_by(|a, b| b.1.cmp(a.1));
+            let causes: Vec<String> = causes.iter().take(4).map(|(at, n)| format!("{at} ×{n}")).collect();
+            note(|| format!("frames: {count} in the last second, {average:.2} ms each on average, longest {:.2} ms; asked by {}", self.longest, causes.join(", ")));
             *self = Self::default();
         }
         result

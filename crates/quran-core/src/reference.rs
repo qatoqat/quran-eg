@@ -104,6 +104,13 @@ fn page_range(page: u16) -> Option<(Key, Key)> {
     tables().page_verses.get(usize::from(page.checked_sub(1)?)).copied()
 }
 
+/// The mushaf page a verse is on (the Madani mushaf's pages end with an ayah's end).
+pub fn page_of(chapter: u16, verse: u16) -> Option<u16> {
+    let (at, pages) = ((chapter, verse), &tables().page_verses);
+    let i = pages.partition_point(|(_, last)| *last < at);
+    pages.get(i).filter(|(first, _)| *first <= at).and_then(|_| u16::try_from(i + 1).ok())
+}
+
 /// The verses with a word on a mushaf page, as `(chapter, span)` per surah. A
 /// verse that runs over a page turn is on both pages.
 pub fn verses_on_page(page: u16) -> Vec<(u16, VerseSpan)> {
@@ -131,8 +138,35 @@ pub fn listings_for_page(page: u16) -> Vec<u16> {
     (listing(first)..=listing(last)).collect()
 }
 
+/// The first and last verse `/verses/by_page/N` returns: from its start to the verse before the next listing's.
+pub fn listing_range(listing: u16) -> Option<((u16, u16), (u16, u16))> {
+    let starts = &tables().listing_starts;
+    let first = *starts.get(usize::from(listing.checked_sub(1)?))?;
+    let last = match starts.get(usize::from(listing)) {
+        Some(&(c, 1)) => (c - 1, verses_in(c - 1)?),
+        Some(&(c, v)) => (c, v - 1),
+        None => (CHAPTER_COUNT, verses_in(CHAPTER_COUNT)?),
+    };
+    Some((first, last))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_verse_is_on_one_page() {
+        assert_eq!((page_of(1, 1), page_of(2, 5), page_of(2, 6), page_of(2, 95), page_of(114, 6)), (Some(1), Some(2), Some(3), Some(15), Some(604)));
+        // Al-Qalam's end and al-Haaqqah's start share page 566.
+        assert_eq!((page_of(68, 52), page_of(69, 1), page_of(69, 9)), (Some(566), Some(566), Some(567)));
+        // Every verse is on the page that lists it.
+        for c in 1..=114u16 {
+            for v in 1..=verses_in(c).unwrap() {
+                let p = page_of(c, v).unwrap();
+                assert!(verses_on_page(p).iter().any(|(ch, s)| *ch == c && s.contains(v)), "{c}:{v} on {p}");
+            }
+        }
+        assert_eq!((page_of(0, 1), page_of(115, 1), page_of(2, 300)), (None, None, None));
+    }
+
     use super::*;
     use crate::parse::MUSHAF_PAGES;
 
@@ -194,6 +228,22 @@ mod tests {
         assert_eq!(listings_for_page(1), [1]);
         assert_eq!(listings_for_page(604), [604]);
         assert!(listings_for_page(0).is_empty());
+        // A listing runs to the verse before the next one's start (listing 589 is what the API returns for it).
+        assert_eq!(listing_range(589), Some(((83, 35), (84, 25))));
+        assert_eq!((listing_range(1), listing_range(604)), (Some(((1, 1), (1, 7))), Some(((112, 1), (114, 6)))));
+        assert_eq!((listing_range(0), listing_range(605)), (None, None));
+        let listed: u32 = (1..=MUSHAF_PAGES)
+            .filter_map(listing_range)
+            .map(|((c, v), (last_c, last_v))| {
+                (c..=last_c).map(|ch| {
+                    let from = if ch == c { v } else { 1 };
+                    let to = if ch == last_c { last_v } else { verses_in(ch).unwrap() };
+                    u32::from(to - from) + 1
+                })
+                .sum::<u32>()
+            })
+            .sum();
+        assert_eq!(listed, 6236, "the listings hold every verse once");
         // No page needs more than its own listing and its two neighbours.
         for page in 1..=MUSHAF_PAGES {
             let listings = listings_for_page(page);

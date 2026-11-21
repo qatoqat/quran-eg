@@ -7,6 +7,7 @@ use quran_core::glyph::MISSING_WORD;
 use quran_core::lists::find_chapter;
 use quran_core::mushaf_layout::{Item, PageBlock};
 use quran_core::parse::revelation_label;
+use quran_core::settings::MUSHAF_LINE;
 
 use super::blocks::{BANNER_SIDE_EM, Block, LoadedSheet, banner};
 use super::place::{self, Metrics, Mode, PILL_HEIGHT, Placed, Row, RowKind, Word, label_key};
@@ -86,6 +87,43 @@ fn alert(block: &Block, placed: &Placed) -> Option<String> {
     })
 }
 
+/// The baseline of a line of text whose top is `top`: the font's ascent and descent (`metrics`, in em, assumed
+/// until a page font says otherwise) centred in the line's height, at `em` points a glyph em.
+pub fn baseline(top: f32, em: f32, metrics: Option<(f32, f32)>) -> f32 {
+    let (ascent, descent) = metrics.unwrap_or(DEFAULT_METRICS);
+    top + (em * MUSHAF_LINE - (ascent + descent) * em) / 2.0 + ascent * em
+}
+
+/// Where a sprite's parts go, right to left from `right` on `baseline` at `em` points a glyph em, each
+/// corner on a pixel by `snap`: every drawn part's rectangle and its place in the sheet.
+pub fn quads(sprite: &Sprite, (right, baseline): (f32, f32), em: f32, snap: impl Fn(f32) -> f32) -> impl Iterator<Item = (Rect, Rect)> {
+    let mut pen = right;
+    sprite.parts.iter().filter_map(move |part| {
+        pen -= part.advance * em;
+        (part.size[0] > 0.0 && part.size[1] > 0.0).then(|| {
+            let min = pos2(snap(pen + part.left * em), snap(baseline - part.top * em));
+            let rect = Rect::from_min_size(min, vec2(part.size[0] * em, part.size[1] * em));
+            (rect, Rect::from_min_max(pos2(part.uv[0], part.uv[1]), pos2(part.uv[2], part.uv[3])))
+        })
+    })
+}
+
+/// An ayah's number drawn as text, without its medallion: a ring round `centre`, and the baseline that centres
+/// the number's ink (`sprite`, at `em` points a glyph em) in it.
+pub fn ring(painter: &Painter, centre: Pos2, sprite: &Sprite, em: f32, ink: Color32) -> f32 {
+    painter.circle_stroke(centre, em * 0.42, Stroke::new(1.0, ink));
+    let part = sprite.parts.first();
+    centre.y - part.map_or(0.0, |p| p.size[1] * em) / 2.0 + part.map_or(0.0, |p| p.top * em)
+}
+
+/// A word with no font to draw it yet: a marked box where it will be, in its box `width` wide centred at
+/// `centre` (the middle of its line).
+pub fn placeholder(painter: &Painter, c: &Colors, centre: Pos2, width: f32, em: f32) {
+    let width = (width.min(em * 2.4) - 4.0).max(em * 0.3);
+    let slot = Rect::from_center_size(centre + vec2(0.0, em * 0.05), vec2(width, em * 0.7));
+    painter.rect(slot, CornerRadius::same(4), Colors::faint(c.muted, 0.12), Stroke::new(1.0, Colors::faint(c.muted, 0.45)), StrokeKind::Inside);
+}
+
 /// A hovered word's box and what its tooltip says (each line, and whether it is in italics).
 pub type Tip = (Rect, Vec<(String, bool)>);
 
@@ -163,6 +201,9 @@ impl Canvas<'_> {
                 for word in words {
                     self.word(at, word, page, sheet, mesh.as_deref_mut());
                 }
+                if let Some(Item::Bismillah { chapter }) = page.items.get(row.item) {
+                    self.bismillah_slots(at, words, *chapter, sheet);
+                }
                 let y = at.y + m.line_height() + m.meaning_gap.max(0.0);
                 let meaning = self.painter.layout_job(place::bismillah_job(meaning, m));
                 self.painter.galley(pos2(at.x + m.line_width / 2.0, y), meaning, m.muted);
@@ -186,6 +227,26 @@ impl Canvas<'_> {
         }
     }
 
+    /// The Bismillah line's four words as places for the voice pointer, `(chapter, 0, 1..=4)`, which sort just
+    /// before the surah's first word: its glyphs, or a quarter each of the one text that stands for them (right
+    /// to left).
+    fn bismillah_slots(&self, row: Pos2, words: &[Word], chapter: u16, sheet: Option<&LoadedSheet>) {
+        let m = self.metrics;
+        let Some(top) = words.first().map(|w| row.y + w.y) else { return };
+        let baseline = baseline(top, m.em, sheet.and_then(|s| s.metrics));
+        let spans: Vec<(f32, f32)> = if words.len() == 4 {
+            words.iter().map(|w| (row.x + w.x, w.width)).collect()
+        } else {
+            let (left, right) = words.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(l, r), w| (l.min(row.x + w.x), r.max(row.x + w.x + w.width)));
+            let quarter = (right - left) / 4.0;
+            (1..=4).map(|k| (right - quarter * k as f32, quarter)).collect()
+        };
+        for (k, (left, width)) in (1..).zip(spans) {
+            let slot = Rect::from_min_size(pos2(left, top), vec2(width, m.line_height()));
+            self.slots.borrow_mut().push(((chapter, 0, k), slot, baseline, m.em));
+        }
+    }
+
     /// One word: its sprite (or what stands in for it) centred in its box on
     /// the line's baseline, and its meaning underneath.
     fn word(&self, row: Pos2, word: &Word, page: &PageBlock, sheet: Option<&LoadedSheet>, mesh: Option<&mut Mesh>) {
@@ -193,8 +254,7 @@ impl Canvas<'_> {
         let left = row.x + word.x;
         let top = row.y + word.y;
         let centre = left + word.width / 2.0;
-        let (ascent, descent) = sheet.and_then(|s| s.metrics).unwrap_or(DEFAULT_METRICS);
-        let baseline = top + (m.line_height() - (ascent + descent) * m.em) / 2.0 + ascent * m.em;
+        let baseline = baseline(top, m.em, sheet.and_then(|s| s.metrics));
         let middle = top + m.line_height() / 2.0;
         let sprite = sheet.and_then(|s| s.sprites.get(&word.key));
         match (word.mode, sprite, mesh) {
@@ -204,12 +264,8 @@ impl Canvas<'_> {
             (Mode::Text { ringed }, Some(sprite), Some(mesh)) => {
                 let ink = if ringed { c.accent } else { c.fg };
                 if ringed {
-                    // An ayah number without its medallion: centred in a ring.
-                    let part = sprite.parts.first().copied();
-                    let height = part.map_or(0.0, |p| p.size[1] * m.em);
-                    let top = part.map_or(0.0, |p| p.top * m.em);
-                    self.painter.circle_stroke(pos2(centre, middle), m.em * 0.42, Stroke::new(1.0, ink));
-                    self.sprite(mesh, sprite, centre + sprite.advance * m.em / 2.0, middle - height / 2.0 + top, ink);
+                    let baseline = ring(self.painter, pos2(centre, middle), sprite, m.em, ink);
+                    self.sprite(mesh, sprite, centre + sprite.advance * m.em / 2.0, baseline, ink);
                 } else {
                     self.sprite(mesh, sprite, centre + sprite.advance * m.em / 2.0, baseline, ink);
                 }
@@ -223,11 +279,7 @@ impl Canvas<'_> {
                 self.painter.text(pos2(centre, middle), Align2::CENTER_CENTER, MISSING_WORD, font, c.muted);
             }
             // No font yet (or the sprite is on its way): a marked box where the word will be.
-            _ => {
-                let width = (word.width.min(m.em * 2.4) - 4.0).max(m.em * 0.3);
-                let slot = Rect::from_center_size(pos2(centre, middle + m.em * 0.05), vec2(width, m.em * 0.7));
-                self.painter.rect(slot, CornerRadius::same(4), Colors::faint(c.muted, 0.12), Stroke::new(1.0, Colors::faint(c.muted, 0.45)), StrokeKind::Inside);
-            }
+            _ => placeholder(self.painter, c, pos2(centre, middle), word.width, m.em),
         }
         let cell = word.cell.filter(|_| word.meaning.is_some()).and_then(|(item, index)| match page.items.get(item)? {
             Item::Line { cells, .. } | Item::Flow { cells, .. } => cells.get(index),
@@ -273,20 +325,11 @@ impl Canvas<'_> {
 
     /// Add a sprite's parts to the mesh, right to left from `right`, on `baseline`.
     fn sprite(&self, mesh: &mut Mesh, sprite: &Sprite, right: f32, baseline: f32, ink: Color32) {
-        let em = self.metrics.em;
         let tint = match sprite.kind {
             Kind::Mask => ink,
             Kind::Color => Color32::WHITE,
         };
-        let mut pen = right;
-        for part in &sprite.parts {
-            pen -= part.advance * em;
-            if part.size[0] <= 0.0 || part.size[1] <= 0.0 {
-                continue;
-            }
-            let min = pos2(self.snap(pen + part.left * em), self.snap(baseline - part.top * em));
-            let rect = Rect::from_min_size(min, vec2(part.size[0] * em, part.size[1] * em));
-            let uv = Rect::from_min_max(pos2(part.uv[0], part.uv[1]), pos2(part.uv[2], part.uv[3]));
+        for (rect, uv) in quads(sprite, (right, baseline), self.metrics.em, |v| self.snap(v)) {
             mesh.add_rect_with_uv(rect, uv, tint);
             if sprite.kind == Kind::Color
                 && let Some(lens) = &self.lens

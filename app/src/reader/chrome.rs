@@ -29,7 +29,8 @@ fn text(ui: &mut Ui, text: &str, size: f32, color: egui::Color32) {
 /// Next | middle | previous: the Quran reads right to left, so "next" is on the
 /// left and "previous" on the right, each with an arrow pointing the way it leads.
 fn nav(ui: &mut Ui, colors: &Colors, neighbours: &Neighbours, open: &mut Option<Location>) {
-    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), egui::Sense::hover());
+    let high = kit::pill_size(ui, "Next", Pill::Outline, Arrow::Left).y;
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), high), egui::Sense::hover());
     let parts = [
         (&neighbours.next, "Next: ", Arrow::Left, Align::Min),
         (&neighbours.middle, "", Arrow::None, Align::Center),

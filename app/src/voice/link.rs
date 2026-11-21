@@ -16,6 +16,8 @@ use tungstenite::Message;
 use tungstenite::stream::MaybeTlsStream;
 
 use super::meter::Gate;
+use super::motion::Plan;
+use super::presence::{self, Presence};
 
 /// `qv listen`'s port, or the one `QURAN_EG_VOICE_PORT` names (tests run a stand-in there, clear of
 /// a listener the user runs).
@@ -46,6 +48,11 @@ pub struct Heard {
     pub t: f32,
     /// Slid into a look-alike ayah: the last shared word and where the reader went.
     pub slid: Option<(Loc, Loc)>,
+    /// Other places the listener weighed (look-alikes of this one).
+    pub alts: Vec<Loc>,
+    /// From a listener that plans (`ev`, `ev_end`, `seq`, `age`, `now`, `plan`, `hold`): where the reader is and how the
+    /// next half second goes.
+    pub plan: Option<Plan>,
 }
 
 /// The microphone the listener captures from (its first message to each client).
@@ -81,9 +88,24 @@ pub enum Audio {
 pub enum Event {
     Connected,
     Heard(Heard),
+    /// A new plan while the place shown stays (`{"replan":{..}}`), and the seconds of audio heard then.
+    Replan(Plan, f32),
+    /// The reader's voice came or went, or a silence began or ended, by the levels a listener sends when asked
+    /// (`presence`), and how far the voice stands over the room's sound, dB.
+    /// The voice came or went (`heard`); how far it stands over the room's sound (dB), and the audio time of the last
+    /// loud level (where a silence began).
+    Voice { heard: presence::Heard, range: Option<f32>, loud: Option<f32> },
     Audio(Audio),
     /// The connection or the listener failed; the link is over.
     Failed(String),
+}
+
+/// What the pointer's settings want from the listener beside its pointers (`{"want":{..}}`, which older listeners pass
+/// over): plans, which come with the voice level, for tajweed timing; the voice level alone for the hold or the dim.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Want {
+    pub plans: bool,
+    pub voice: bool,
 }
 
 pub struct Link {
@@ -91,6 +113,7 @@ pub struct Link {
     child: Option<Child>,
     events: Receiver<Event>,
     visible: Sender<(Loc, Loc, bool)>,
+    want: Sender<Want>,
     stop: Arc<AtomicBool>,
     log: Option<PathBuf>,
 }
@@ -107,14 +130,32 @@ fn parse_loc(s: &str) -> Option<Loc> {
     it.next().is_none().then_some(loc)
 }
 
-/// A message from the listener, by its key: news of the microphone or a pointer (`loc`); `None` for
-/// anything else it sends (checker findings, tariq notes, later news). The microphone's:
+/// What a message says: an event, or a frame's voice level (`{"voice":{"t":..,"db":..}}`, which the link thread turns
+/// into the voice's presence).
+enum Read {
+    Event(Event),
+    Voice(f32, f32),
+}
+
+/// A message from the listener, by its key: news of the microphone, a pointer (`loc`), a plan alone (`replan`) or a
+/// voice level; `None` for anything else it sends (checker findings, tariq notes, later news). The microphone's:
 /// - `{"mic":{"name":"…","rate":48000,"channels":2}}`, first to each client;
 /// - `{"level":{"rms":-27.4,"peak":-11.9,"clip":false}}`, about 15 a second while samples arrive;
 /// - `{"audio":"stalled"}` and `{"audio":"error","detail":"…"}`, once each time, until a level.
-pub fn parse(text: &str) -> Option<Event> {
+fn read(text: &str) -> Option<Read> {
     use serde_json::Value;
     let v: Value = serde_json::from_str(text).ok()?;
+    if let Some(x) = v.get("voice") {
+        return Some(Read::Voice(x.get("t")?.as_f64()? as f32, x.get("db")?.as_f64()? as f32));
+    }
+    if let Some(r) = v.get("replan") {
+        return Some(Read::Event(Event::Replan(plan(r)?, r.get("t").and_then(Value::as_f64).unwrap_or(0.0) as f32)));
+    }
+    event(&v).map(Read::Event)
+}
+
+fn event(v: &serde_json::Value) -> Option<Event> {
+    use serde_json::Value;
     if let Some(l) = v.get("level") {
         let rms = l.get("rms")?.as_f64()? as f32;
         let peak = l.get("peak").and_then(Value::as_f64).map_or(rms, |p| p as f32);
@@ -134,7 +175,26 @@ pub fn parse(text: &str) -> Option<Event> {
             _ => None,
         };
     }
-    heard(&v).map(Event::Heard)
+    heard(v).map(Event::Heard)
+}
+
+/// A plan's fields, in a pointer message or a plan alone.
+fn plan(v: &serde_json::Value) -> Option<Plan> {
+    let pair = |k: &str| v.get(k)?.as_array().and_then(|a| Some((a.first()?.as_f64()?, a.get(1)?.as_f64()?)));
+    let num = |k: &str| v.get(k).and_then(|x| x.as_f64());
+    let (word, letter) = pair("ev")?;
+    let now = num("now")? as f32;
+    let knots = v.get("plan")?.as_array()?.iter().filter_map(|k| Some((k.get(0)?.as_f64()? as f32, k.get(1)?.as_f64()? as f32))).collect();
+    Some(Plan {
+        seq: num("seq")? as u32,
+        age: num("age")? as f32,
+        ev: (word as u32, letter as u16),
+        // A listener that does not say where the evidenced letter ends: no further than where the reader is.
+        ev_end: num("ev_end").map_or(now, |e| e as f32),
+        now,
+        knots,
+        hold: pair("hold").map(|(a, b)| (a as f32, b as f32)),
+    })
 }
 
 /// A pointer message.
@@ -151,6 +211,8 @@ fn heard(v: &serde_json::Value) -> Option<Heard> {
         speed: num("speed").unwrap_or(0.0) as f32,
         t: num("t").unwrap_or(0.0) as f32,
         slid,
+        alts: v.get("alts").and_then(|a| a.as_array()).map_or_else(Vec::new, |a| a.iter().filter_map(|l| parse_loc(l.as_str()?)).collect()),
+        plan: plan(v),
     })
 }
 
@@ -168,13 +230,14 @@ impl Link {
         };
         let (events_tx, events) = channel();
         let (visible, visible_rx) = channel();
+        let (want, want_rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         std::thread::Builder::new()
             .name("voice-link".into())
-            .spawn(move || run(&events_tx, &visible_rx, &flag, &ctx))
+            .spawn(move || run(&events_tx, (&visible_rx, &want_rx), &flag, &ctx))
             .map_err(|e| format!("could not start the listener's thread: {e}"))?;
-        Ok(Link { child, events, visible, stop, log })
+        Ok(Link { child, events, visible, want, stop, log })
     }
 
     /// What arrived since the last call.
@@ -195,6 +258,11 @@ impl Link {
     /// put them there (not the pointer's own scrolling or navigation), so a search may start there.
     pub fn send_visible(&self, first: Loc, last: Loc, by_reader: bool) {
         let _ = self.visible.send((first, last, by_reader));
+    }
+
+    /// What the settings want from the listener beside its pointers; it goes out once connected.
+    pub fn send_want(&self, want: Want) {
+        let _ = self.want.send(want);
     }
 
     /// Whether this link started the listener (and stops it).
@@ -238,7 +306,7 @@ fn spawn(dir: &Path) -> Result<(Child, PathBuf), String> {
     Ok((child, log))
 }
 
-fn run(events: &Sender<Event>, visible: &Receiver<(Loc, Loc, bool)>, stop: &AtomicBool, ctx: &egui::Context) {
+fn run(events: &Sender<Event>, (visible, want): (&Receiver<(Loc, Loc, bool)>, &Receiver<Want>), stop: &AtomicBool, ctx: &egui::Context) {
     let send = |e: Event| {
         let _ = events.send(e);
         ctx.request_repaint();
@@ -261,7 +329,7 @@ fn run(events: &Sender<Event>, visible: &Receiver<(Loc, Loc, bool)>, stop: &Atom
         return send(Event::Failed(format!("listener connection: {e}")));
     }
     send(Event::Connected);
-    let mut gate = Gate::default();
+    let (mut gate, mut presence) = (Gate::default(), Presence::default());
     loop {
         if stop.load(Ordering::Relaxed) {
             let _ = ws.close(None);
@@ -275,11 +343,23 @@ fn run(events: &Sender<Event>, visible: &Receiver<(Loc, Loc, bool)>, stop: &Atom
                 return send(Event::Failed(format!("listener connection: {e}")));
             }
         }
+        if let Some(w) = want.try_iter().last() {
+            let msg = format!(r#"{{"want":{{"plans":{},"voice":{}}}}}"#, w.plans, w.voice);
+            if let Err(e) = ws.send(Message::text(msg)) {
+                return send(Event::Failed(format!("listener connection: {e}")));
+            }
+        }
         match ws.read() {
-            Ok(Message::Text(t)) => match parse(t.as_str()) {
-                // Levels that would not move the meter are not worth waking the app for.
-                Some(Event::Audio(a)) if !gate.pass(&a) => {}
-                Some(e) => send(e),
+            Ok(Message::Text(t)) => match read(t.as_str()) {
+                // Levels that would not move the meter are not worth waking the app for, nor the voice's while its
+                // presence stays.
+                Some(Read::Event(Event::Audio(a))) if !gate.pass(&a) => {}
+                Some(Read::Event(e)) => send(e),
+                Some(Read::Voice(t, db)) => {
+                    if let Some(heard) = presence.push(t, db) {
+                        send(Event::Voice { heard, range: presence.range(), loud: presence.last_loud() });
+                    }
+                }
                 None => {}
             },
             Ok(Message::Close(_)) => return send(Event::Failed("the listener closed the connection".into())),
@@ -295,16 +375,40 @@ fn run(events: &Sender<Event>, visible: &Receiver<(Loc, Loc, bool)>, stop: &Atom
 mod tests {
     use super::*;
 
+    /// The events a message gives (a voice level is the link thread's).
+    fn parse(text: &str) -> Option<Event> {
+        match read(text)? {
+            Read::Event(e) => Some(e),
+            Read::Voice(..) => None,
+        }
+    }
+
     #[test]
     fn pointer_messages_parse_and_others_do_not() {
         let Some(Event::Heard(h)) = parse(r#"{"loc":"57:16:4","word":51234,"letter":2,"letters":5,"state":"Locked","conf":0.97,"speed":6.1,"t":12.5,"lat":0.081,"alts":["57:17:1"],"slid":["2:5:1","31:5:1"]}"#) else {
             panic!("a pointer message")
         };
         assert_eq!((h.loc, h.word, h.letter, h.letters, h.state.as_str()), ((57, 16, 4), 51234, 2, 5, "Locked"));
-        assert_eq!(h.slid, Some(((2, 5, 1), (31, 5, 1))));
+        assert_eq!((h.slid, h.alts), (Some(((2, 5, 1), (31, 5, 1))), vec![(57, 17, 1)]));
+        assert_eq!(h.plan, None, "no plan from an older listener");
         assert!(parse(r#"{"findings":[]}"#).is_none());
         assert!(parse(r#"{"loc":"57:16","word":1,"state":"Locked"}"#).is_none(), "a location has three parts");
         assert!(parse("not json").is_none());
+    }
+
+    #[test]
+    fn plans_parse_with_their_pointer_or_alone_and_voice_levels_are_the_threads() {
+        let msg = r#"{"loc":"36:16:4","word":37000,"letter":1,"letters":4,"state":"Locked","conf":0.97,"speed":6.1,"t":12.5,"lat":0.081,"alts":[],"ev":[37000,1],"ev_end":37000.475,"seq":7,"age":0.120,"now":37000.300,"plan":[[0.200,0.100],[0.600,0.175]],"hold":[0.100,0.900]}"#;
+        let Some(Event::Heard(h)) = parse(msg) else { panic!("a pointer message") };
+        let p = h.plan.expect("its plan");
+        assert_eq!((p.seq, p.ev, p.knots.len(), p.hold), (7, (37000, 1), 2, Some((0.1, 0.9))));
+        assert!((p.now - 37000.3).abs() < 1e-2 && (p.ev_end - 37000.475).abs() < 1e-2 && (p.position(0.4) - (p.now + 0.1375)).abs() < 5e-3);
+        let Some(Event::Replan(q, t)) = parse(r#"{"replan":{"t":12.82,"ev":[37000,2],"seq":8,"age":0.050,"now":37000.500,"plan":[]}}"#) else {
+            panic!("a plan alone")
+        };
+        assert_eq!((q.seq, t, q.ev_end), (8, 12.82, q.now), "no ev_end: no further than now");
+        assert!(parse(r#"{"voice":{"t":12.84,"db":-31.5}}"#).is_none(), "a level is the link thread's");
+        assert!(matches!(read(r#"{"voice":{"t":12.84,"db":-31.5}}"#), Some(Read::Voice(t, db)) if t == 12.84 && db == -31.5));
     }
 
     #[test]

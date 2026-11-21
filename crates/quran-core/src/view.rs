@@ -56,6 +56,17 @@ impl View {
         View::Surah { chapter, span: None }
     }
 
+    /// The view in this one's mode that holds the word `at`, for going there without switching the mode (the voice
+    /// pointer following the reader): the page it is on, its juz, else its surah.
+    pub fn holding(self, at: WordRef, juzs: &[Juz]) -> View {
+        let surah = View::surah(at.chapter);
+        match self {
+            View::Page(_) => reference::page_of(at.chapter, at.verse).map_or(surah, View::Page),
+            View::Juz(_) => juz_of(juzs, at.chapter, at.verse).map_or(surah, View::Juz),
+            _ => surah,
+        }
+    }
+
     /// The list of surahs or of ajzāʾ; pages have none.
     pub fn index(mode: Mode) -> Option<Self> {
         match mode {
@@ -441,6 +452,20 @@ impl Neighbours {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn going_to_a_word_keeps_the_mode() {
+        let at = |chapter, verse| WordRef { chapter, verse, word: 1 };
+        // A page for a page: al-Haaqqah's start shares page 566 with al-Qalam's end; 69:9 is on the next.
+        assert_eq!(View::Page(566).holding(at(69, 9), &[]), View::Page(567));
+        assert_eq!(View::Page(1).holding(at(69, 1), &[]), View::Page(566));
+        // A juz for a juz, a surah for a surah (and for the lists).
+        let juzs = [juz(28, 58, "1-22"), juz(29, 67, "1-30")];
+        assert_eq!(View::Juz(28).holding(at(67, 3), &juzs), View::Juz(29));
+        assert_eq!(View::Juz(28).holding(at(2, 3), &juzs), View::surah(2), "no juz known: the surah");
+        assert_eq!(View::Surah { chapter: 66, span: span(1, 12) }.holding(at(67, 1), &juzs), View::surah(67));
+        assert_eq!(View::SurahList.holding(at(67, 1), &juzs), View::surah(67));
+    }
 
     fn juz(n: u8, chapter: u16, range: &str) -> Juz {
         serde_json::from_value(serde_json::json!({

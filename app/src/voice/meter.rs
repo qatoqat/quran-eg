@@ -2,7 +2,7 @@
 //! second; the button's disc fills from the bottom as high as the voice is loud, rising quickly and
 //! settling slowly so that it bobs calmly between syllables. Clipping turns it the danger colour for a
 //! moment; the listener's word that no audio arrives, or that capture failed, strikes it through. It
-//! asks for frames only while it changes.
+//! asks for frames only while it changes: a frame for each row of pixels the fill's surface crosses.
 
 use super::link::{Audio, Device, Level};
 use crate::kit::Mic;
@@ -34,8 +34,11 @@ const QUIET_STEP: f32 = 6.0;
 /// The tooltip says the loudest level of each half second, and holds it for the next, so that it can
 /// be read.
 const SAY: f64 = 0.5;
-/// Seconds between frames while the fill moves: plenty for a slow, faint tint.
+/// Seconds between frames while the danger colour fades (and the connecting spinner turns): plenty for a slow,
+/// faint tint.
 pub const FRAME: f32 = 1.0 / 30.0;
+/// The Listen button's disc, points high (`kit::icon_button`): the fill is drawn to its rows of pixels.
+const DISC: f32 = 35.0;
 
 /// An input level (dBFS) as the share of the disc it fills: linear in dB from the floor to full.
 fn display(db: f32) -> f32 {
@@ -110,6 +113,8 @@ pub struct Meter {
     trouble: Option<Trouble>,
     /// When the fill last moved; `None` at rest.
     moved: Option<f64>,
+    /// Rows of pixels in the disc's height (its points at the screen's pixels per point).
+    rows: f32,
 }
 
 /// One step of the fill from `shown` toward `level` over `dt` seconds.
@@ -122,6 +127,23 @@ fn settle(shown: f32, level: f32, dt: f32) -> f32 {
     };
     let next = shown + step;
     if (level - next).abs() < REST { level } else { next }
+}
+
+/// The fill as drawn: to the nearest of `rows` rows of pixels.
+fn row(level: f32, rows: f32) -> f32 {
+    (level * rows).round() / rows
+}
+
+/// Seconds until a fill at `shown` settling toward `level` crosses into the next of `rows` rows (it moves at least
+/// that fast: a fall is the faster of its ease and its slowest fall).
+fn next_row(shown: f32, level: f32, rows: f32) -> f32 {
+    let edge = ((shown * rows).round() + 0.5 * (level - shown).signum()) / rows;
+    let gap = (level - shown).abs();
+    // (Within `REST` of its level it lands there.)
+    let to_edge = (edge - shown).abs().min((gap - REST).max(0.0));
+    let tau = if level > shown { ATTACK } else { RELEASE };
+    let eased = -tau * (1.0 - to_edge / gap).ln();
+    if level < shown { eased.min(to_edge / MIN_FALL) } else { eased }
 }
 
 /// Whole decibels, with an ASCII minus (and no "-0").
@@ -171,16 +193,22 @@ impl Meter {
         *self = Meter { device: self.device.take(), trouble: Some(trouble), ..Meter::default() };
     }
 
-    /// Moves the fill toward the level heard, and says the tooltip's level anew each half second.
-    /// Returns how soon it wants another frame: soon while the fill moves or its colour fades, at the
-    /// end of a loud level's hold or of the half second if the level has changed, never at rest.
-    pub fn tick(&mut self, now: f64) -> Option<f32> {
+    /// Moves the fill toward the level heard, and says the tooltip's level anew each half second, on a
+    /// screen of `ppp` pixels a point. Returns how soon it wants another frame: when the fill's surface
+    /// crosses into the next row of pixels, soon while its colour fades, at the end of a loud level's
+    /// hold or of the half second if the level has changed, never at rest.
+    pub fn tick(&mut self, now: f64, ppp: f32) -> Option<f32> {
+        self.rows = DISC * if ppp > 0.0 { ppp } else { 1.0 };
         if let Some(fresh) = self.fresh.take() {
             self.target = fresh;
         }
         // The first step from rest is a frame's: the level came just now.
         let dt = self.moved.map_or(FRAME, |t| (now - t) as f32).clamp(0.0, 0.25);
         self.shown = settle(self.shown, self.target, dt);
+        // In the row it settles in, it is drawn as it will be.
+        if row(self.shown, self.rows) == row(self.target, self.rows) {
+            self.shown = self.target;
+        }
         let moving = self.shown != self.target;
         self.moved = moving.then_some(now);
         if let Some(loudest) = self.loudest
@@ -193,17 +221,20 @@ impl Meter {
         // Said again when the half second is over, if the newest level is not what it says.
         let say = self.said.filter(|&(_, said)| self.level != Some(said)).map(|(t, _)| (t + SAY - now) as f32);
         let hold = self.loud_at.map_or(f64::NEG_INFINITY, |t| t + HOLD - now);
-        if moving || (-FADE..=0.0).contains(&hold) {
+        let row = moving.then(|| next_row(self.shown, self.target, self.rows));
+        if (-FADE..=0.0).contains(&hold) {
             Some(FRAME)
         } else {
-            // No sooner than a frame: one that comes a hair early would otherwise ask for a burst.
-            [(hold > 0.0).then_some(hold as f32), say].into_iter().flatten().reduce(f32::min).map(|after| after.max(FRAME))
+            // No sooner than a frame for what is timed: one that comes a hair early would otherwise ask for a burst.
+            let timed = [(hold > 0.0).then_some(hold as f32), say].into_iter().flatten().reduce(f32::min).map(|after| after.max(FRAME));
+            [row, timed].into_iter().flatten().reduce(f32::min)
         }
     }
 
     /// The button while listening.
     pub fn mic(&self, now: f64) -> Mic {
-        if self.trouble.is_some() { Mic::Trouble } else { Mic::On { level: self.shown, loud: self.loud(now) } }
+        let level = if self.rows > 0.0 { row(self.shown, self.rows) } else { self.shown };
+        if self.trouble.is_some() { Mic::Trouble } else { Mic::On { level, loud: self.loud(now) } }
     }
 
     /// How far the button has turned the danger colour: 1 while a loud level holds, then fading.
@@ -253,14 +284,22 @@ mod tests {
         Audio::Level(Level { rms, peak: rms + 12.0, clip: false })
     }
 
-    /// Ticks at 30 frames a second from `t` while the meter asks for the next frame; returns when it
-    /// stops.
+    /// Ticks from `t` while the fill moves, when the meter asks and at least 30 times a second (the
+    /// tooltip's half seconds go by as in the app); returns when the fill rests.
     fn settle_from(m: &mut Meter, mut t: f64) -> f64 {
-        while m.tick(t).is_some_and(|after| after <= FRAME) {
-            t += f64::from(FRAME);
+        while let Some(after) = m.tick(t, 1.0).filter(|_| m.moved.is_some()) {
+            t += f64::from(after.min(FRAME)).max(1e-4);
             assert!(t < 100.0, "the meter comes to rest");
         }
         t
+    }
+
+    /// The fill a frame draws.
+    fn fill_of(mic: Mic) -> f32 {
+        match mic {
+            Mic::On { level, .. } => level,
+            _ => panic!("{mic:?}"),
+        }
     }
 
     /// What the tooltip says of the level, without the device.
@@ -299,8 +338,38 @@ mod tests {
         assert!(empty - full < 3.0, "empty within 3 s, not {}", empty - full);
         assert_eq!(m.mic(empty), Mic::On { level: 0.0, loud: 0.0 });
         for k in 1..100 {
-            assert_eq!(m.tick(empty + f64::from(k) * 0.5), None, "at rest, the meter asks for no frames");
+            assert_eq!(m.tick(empty + f64::from(k) * 0.5, 1.0), None, "at rest, the meter asks for no frames");
         }
+    }
+
+    #[test]
+    fn the_fill_asks_for_a_frame_for_each_row_of_pixels_it_crosses() {
+        // Full, then emptying over the disc's rows of pixels, frames only when the meter asks: each draws the fill a
+        // row on from the last, about as many frames as rows (not 30 a second), and the fill is at rest empty.
+        for ppp in [1.0, 2.0] {
+            let rows = DISC * ppp;
+            let mut m = Meter::default();
+            m.hear(level(-6.0), 0.0);
+            let full = settle_from(&mut m, 0.0);
+            m.hear(level(-70.0), full);
+            let (mut t, mut drawn) = (full, vec![1.0]);
+            while let Some(after) = m.tick(t, ppp).filter(|_| m.moved.is_some()) {
+                drawn.push(fill_of(m.mic(t)));
+                t += f64::from(after) + 1e-4;
+            }
+            drawn.push(fill_of(m.mic(t)));
+            drawn.dedup();
+            // (The first step from rest is a frame's at 30 a second: the level came just now.)
+            let steps: Vec<f32> = drawn.windows(2).map(|w| (w[0] - w[1]) * rows).collect();
+            assert!(steps[0] < 2.5 * ppp && steps[1..].iter().all(|s| (s - 1.0).abs() < 0.01), "{ppp}: a row at a time: {steps:?}");
+            assert!(drawn.len() as f32 >= rows - 2.5 * ppp && t - full < 3.0 && *drawn.last().unwrap() == 0.0, "{ppp}: {} rows drawn in {} s", drawn.len(), t - full);
+        }
+        // Rising, the rows go by faster than frames: a frame at once, the fill drawn to its row.
+        let mut m = Meter::default();
+        m.hear(level(-30.0), 0.0);
+        assert!(m.tick(0.0, 1.0).is_some_and(|after| after < FRAME));
+        let f = fill_of(m.mic(0.0)) * DISC;
+        assert!(f > 0.0 && (f - f.round()).abs() < 1e-4, "{f}");
     }
 
     #[test]
@@ -313,7 +382,7 @@ mod tests {
         settle_from(&mut m, 10.0);
         m.hear(Audio::Level(Level { rms: -20.0, peak: -8.0, clip: true }), 11.0);
         assert_eq!(m.loud(12.4), 1.0, "another clip holds it longer");
-        assert_eq!(m.tick(12.0), Some(0.5), "a frame at the end of the hold, none before");
+        assert_eq!(m.tick(12.0, 1.0), Some(0.5), "a frame at the end of the hold, none before");
         let mut m = Meter::default();
         m.hear(Audio::Level(Level { rms: -20.0, peak: -0.5, clip: false }), 0.0);
         assert_eq!(m.loud(0.0), 1.0, "a peak near full scale is too loud");
@@ -354,7 +423,7 @@ mod tests {
         let (mut gate, mut m) = (Gate::default(), Meter::default());
         for (k, rms) in [-20.0, -24.0, -19.0].into_iter().enumerate() {
             through(&mut gate, &mut m, voice(rms), k as f64 / 15.0);
-            m.tick(k as f64 / 15.0);
+            m.tick(k as f64 / 15.0, 1.0);
         }
         for rms in [-18.5, -21.9, -61.1, -62.0, -60.5, -63.0] {
             through(&mut gate, &mut m, voice(rms), 6.0);
@@ -365,7 +434,7 @@ mod tests {
         for rms in [-62.0, -60.5, -61.5] {
             through(&mut gate, &mut m, voice(rms), rest + 1.0);
         }
-        assert_eq!(m.tick(rest + 1.0), None, "the quiet room wakes nothing more");
+        assert_eq!(m.tick(rest + 1.0, 1.0), None, "the quiet room wakes nothing more");
     }
 
     #[test]
@@ -374,11 +443,11 @@ mod tests {
         m.hear(level(-30.0), 0.0);
         settle_from(&mut m, 0.0);
         m.hear(Audio::Stalled, 1.0);
-        assert_eq!((m.mic(1.0), m.tick(1.0)), (Mic::Trouble, None));
+        assert_eq!((m.mic(1.0), m.tick(1.0, 1.0)), (Mic::Trouble, None));
         assert_eq!(m.trouble().as_deref(), Some("no audio from the microphone"));
         m.hear(level(-30.0), 2.0);
         assert_eq!(m.mic(2.0), Mic::On { level: 0.0, loud: 0.0 }, "the fill starts from empty");
-        m.tick(2.0);
+        m.tick(2.0, 1.0);
         assert!(matches!(m.mic(2.0), Mic::On { level, .. } if level > 0.0 && level < 0.5));
         m.hear(Audio::Error("unplugged".into()), 3.0);
         m.hear(Audio::Stalled, 4.0);
@@ -391,7 +460,7 @@ mod tests {
         let mut m = Meter::default();
         let at = |m: &mut Meter, rms: f32, t: f64| {
             m.hear(voice(rms), t);
-            m.tick(t)
+            m.tick(t, 1.0)
         };
         at(&mut m, -30.0, 0.0);
         assert_eq!(says(&m, 0.0), "Microphone: hearing you, -30 dB (peak -18 dB)");
@@ -399,28 +468,28 @@ mod tests {
         at(&mut m, -36.0, 0.2);
         at(&mut m, -31.0, 0.3);
         assert_eq!(says(&m, 0.3), "Microphone: hearing you, -30 dB (peak -18 dB)", "held for half a second");
-        m.tick(0.5);
+        m.tick(0.5, 1.0);
         assert_eq!(says(&m, 0.5), "Microphone: hearing you, -22 dB (peak -10 dB)");
         // The reader stops: the half second after the last syllable says it, the next the quiet.
         at(&mut m, -61.0, 0.6);
-        m.tick(1.0);
+        m.tick(1.0, 1.0);
         assert_eq!(says(&m, 1.0), "Microphone: hearing you, -31 dB (peak -19 dB)");
-        m.tick(1.5);
+        m.tick(1.5, 1.0);
         assert_eq!(says(&m, 1.5), "Microphone: quiet (-61 dB)");
         // Steady noise over the floor is no voice.
         let mut m = Meter::default();
         m.hear(level(-48.0), 0.0);
-        assert_eq!(m.tick(0.0), Some(FRAME));
+        assert!(m.tick(0.0, 1.0).is_some_and(|after| after <= FRAME), "a frame for the fill");
         assert_eq!(says(&m, 0.0), "Microphone: quiet (-48 dB)");
         // A mute, with the disc empty: no frame but the ones to say it.
         let mut m = Meter::default();
         m.hear(level(-60.0), 0.0);
-        assert_eq!(m.tick(0.0), None);
+        assert_eq!(m.tick(0.0, 1.0), None);
         m.hear(level(-120.0), 0.2);
-        assert_eq!(m.tick(0.2), Some(0.3), "a frame when the half second is over");
-        assert_eq!(m.tick(0.5), Some(0.5), "which says the loudest of it, and another");
+        assert_eq!(m.tick(0.2, 1.0), Some(0.3), "a frame when the half second is over");
+        assert_eq!(m.tick(0.5, 1.0), Some(0.5), "which says the loudest of it, and another");
         assert_eq!(says(&m, 0.5), "Microphone: quiet (-60 dB)");
-        assert_eq!(m.tick(1.0), None);
+        assert_eq!(m.tick(1.0, 1.0), None);
         assert_eq!(says(&m, 1.0), "Microphone: no sound at all, is it muted?");
     }
 
@@ -429,16 +498,16 @@ mod tests {
         let mut m = Meter::default();
         assert_eq!(m.line(0.0), None, "nothing until the listener says something");
         m.hear(level(-58.0), 0.0);
-        m.tick(0.0);
+        m.tick(0.0, 1.0);
         assert_eq!(m.line(0.0).as_deref(), Some("Microphone: quiet (-58 dB)"));
         m.hear(Audio::Mic(Device { name: "HDA Intel PCH".into(), rate: 48000, channels: 2 }), 0.0);
         assert_eq!(m.line(0.0).as_deref(), Some("Microphone: quiet (-58 dB)\nHDA Intel PCH, 48 kHz stereo"));
         m.hear(level(-120.0), 1.0);
-        m.tick(1.0);
-        m.tick(1.5);
+        m.tick(1.0, 1.0);
+        m.tick(1.5, 1.0);
         assert!(m.line(1.5).unwrap().starts_with("Microphone: no sound at all, is it muted?\n"));
         m.hear(Audio::Level(Level { rms: -30.0, peak: -9.2, clip: false }), 2.0);
-        m.tick(2.0);
+        m.tick(2.0, 1.0);
         assert!(m.line(2.0).unwrap().starts_with("Microphone: hearing you, -30 dB (peak -9 dB)\n"));
         m.hear(Audio::Level(Level { rms: -10.0, peak: 0.0, clip: true }), 2.1);
         assert!(m.line(2.1).unwrap().starts_with("Microphone: too loud, the sound is clipping. Move back or lower the input volume\n"));

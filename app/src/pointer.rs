@@ -91,6 +91,8 @@ pub struct ReadingPointer {
     size: f32,
     last: Option<(Pos2, f64)>,
     shown: bool,
+    /// When it was last drawn, and whether it was on its way then (moving, or its smudge or size still settling).
+    drawn: Option<(f64, bool)>,
 }
 
 impl ReadingPointer {
@@ -133,8 +135,27 @@ impl ReadingPointer {
             self.hide();
             return;
         };
-        self.draw(ctx, pointer, colors, area, line_height, at, 1.0, "reading-pointer", None);
+        let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::unique("reading-pointer"));
+        if self.draw(ctx, layer, pointer, colors, area, line_height, at, 1.0, None) {
+            ctx.request_repaint();
+        }
         ctx.set_cursor_icon(egui::CursorIcon::None);
+    }
+
+    /// The page moved under the pointer by `by` (it scrolled). The smudge lies on the page, so its path moves with
+    /// it: a head that stays on its word while the page scrolls leaves no streak (in screen space it smeared along the
+    /// scroll). The voice pointer's; the mouse's head stays where the cursor is.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn scrolled(&mut self, by: Vec2) {
+        for (p, _) in self.path.iter_mut().chain(self.last.as_mut()) {
+            *p += by;
+        }
+    }
+
+    /// The oldest and the newest point of the smudge's path.
+    #[cfg(test)]
+    pub fn path_ends(&self) -> Option<(Pos2, Pos2)> {
+        Some((self.path.front()?.0, self.path.back()?.0))
     }
 
     /// Nothing drawn: the next pointer appears with nothing behind it to smear.
@@ -144,19 +165,30 @@ impl ReadingPointer {
     }
 
     /// Move the pointer to `at` (not the mouse: the voice pointer) and draw it at `alpha` of its
-    /// opacity, on its own layer.
+    /// opacity, on `layer` (its own over the page; the settings' preview's own).
     /// `size` is what the pointer's size is in tenths of (the voice pointer: the text size); `ring`, a
-    /// ring's line in points instead of a share of its size.
+    /// ring's line in points instead of a share of its size. Whether its smudge or its size is still on its
+    /// way with the head where it is (the caller asks for the frames: the head moves by its own).
     #[cfg(not(target_arch = "wasm32"))]
     #[allow(clippy::too_many_arguments)]
-    pub fn show_at(&mut self, ctx: &egui::Context, pointer: &Pointer, colors: &Colors, area: Rect, size: f32, ring: Option<f32>, at: Pos2, alpha: f32) {
-        self.draw(ctx, pointer, colors, area, size, at, alpha, "voice-pointer", ring);
+    pub fn show_at(&mut self, ctx: &egui::Context, layer: egui::LayerId, pointer: &Pointer, colors: &Colors, area: Rect, size: f32, ring: Option<f32>, at: Pos2, alpha: f32) -> bool {
+        self.draw(ctx, layer, pointer, colors, area, size, at, alpha, ring)
     }
 
+    /// Draws the pointer; whether it is still on its way with the head where it is: the smudge drawing back, the size
+    /// easing by half a pixel or more, or (shrinking with speed) the speed dying down.
     #[allow(clippy::too_many_arguments)]
-    fn draw(&mut self, ctx: &egui::Context, pointer: &Pointer, colors: &Colors, area: Rect, line_height: f32, at: Pos2, alpha: f32, layer: &'static str, ring: Option<f32>) {
-        let (now, dt) = ctx.input(|i| (i.time, i.stable_dt.min(0.1)));
+    fn draw(&mut self, ctx: &egui::Context, layer: egui::LayerId, pointer: &Pointer, colors: &Colors, area: Rect, line_height: f32, at: Pos2, alpha: f32, ring: Option<f32>) -> bool {
+        // The time since the last frame while it was on its way (frames come when they are asked for, however far
+        // apart); after a rest, egui's steady measure (a frame, not the whole sleep).
+        let (now, steady) = ctx.input(|i| (i.time, i.stable_dt));
+        let dt = match self.drawn {
+            Some((then, true)) => (now - then) as f32,
+            _ => steady,
+        }
+        .clamp(0.0, 0.1);
         let frames = dt * RATE;
+        let moved = self.last.is_some_and(|(from, _)| from != at);
         if !self.shown {
             // Appearing: nothing behind it to smear yet.
             self.path.clear();
@@ -182,13 +214,13 @@ impl ReadingPointer {
         let wanted = 1.0 - shrink * (self.speed / 2.0).min(1.0);
         self.size += (wanted - self.size) * (1.0 - 0.7f32.powf(frames));
         let diameter = Self::diameter(pointer, line_height);
+        // Within half a pixel of its size it is at its size.
+        let px = 0.5 / ctx.pixels_per_point();
+        if (wanted - self.size).abs() * diameter / 2.0 < px {
+            self.size = wanted;
+        }
         let (window, widths) = smudge_reach(pointer.smudge_distance);
         self.trace(at, now, dt, pointer.smudge > 0, window, widths * diameter);
-        // The size, or the smudge behind the head (until it has drawn back), is still on its way:
-        // keep animating. At rest every point of the path is at the head or gone.
-        if self.speed > 0.01 || (wanted - self.size).abs() > 0.01 || self.path.iter().any(|(p, _)| p.distance(at) > 0.5) {
-            ctx.request_repaint();
-        }
 
         let [r, g, b] = parse_hex(&pointer.color).unwrap_or([255; 3]);
         let color = |a: f32| Color32::from_rgba_unmultiplied(r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8);
@@ -200,10 +232,13 @@ impl ReadingPointer {
             // A ring keeps its hole: a set line is at most a quarter of its width.
             PointerShape::Ring => ring.map_or(diameter * RING, |r| r.min(diameter / 4.0)) * self.size,
         };
-        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::unique(layer)));
-        let painter = painter.with_clip_rect(area);
+        let painter = ctx.layer_painter(layer).with_clip_rect(area);
         let ds = (radius * SPACING).max(1.0);
         let stamps = smear(&self.path, at, now, ds, window, self.tail);
+        // A smudge drawn draws back into a head that stays, frame by frame; the size eases; a shrunken pointer grows
+        // back as its speed dies down (only the mouse pointer shrinks).
+        let settling = !stamps.is_empty() || self.size != wanted || (shrink > 0.0 && self.speed > 0.01);
+        self.drawn = Some((now, moved || settling));
         if !stamps.is_empty() {
             // One mesh under the head; every stamp is the same colour, so their order does not matter.
             let chord = 2.0 * (band * (2.0 * radius - band)).sqrt();
@@ -230,6 +265,7 @@ impl ReadingPointer {
             soft_ring(&mut mesh, at, radius, band, blur, 48, |c| color(opacity * c));
             painter.add(Shape::mesh(mesh));
         }
+        settling
     }
 
     /// Notes the head at `at`, `dt` after the last frame: the path behind it, kept for `window` seconds
@@ -665,5 +701,60 @@ mod tests {
             let behind = (0..size.1).map(|y| smudge[y * size.0 + column]).fold(0.0f32, f32::max);
             assert!(behind > 0.2 * opacity, "{radius}/{band}/{blur}: streak {behind}");
         }
+    }
+
+    /// Draws the voice pointer at `at` at time `now` (a 20-point line); whether it is still settling where it is.
+    fn shown_at(ctx: &egui::Context, p: &mut ReadingPointer, pointer: &Pointer, at: Pos2, now: f64) -> bool {
+        let colors = Colors::of(&quran_core::settings::Settings::default(), false);
+        let mut settling = false;
+        let mut output = ctx.run_pass(egui::RawInput { time: Some(now), ..Default::default() }, |ctx| {
+            let layer = egui::LayerId::new(egui::Order::Middle, egui::Id::unique("p"));
+            settling = p.show_at(ctx, layer, pointer, &colors, Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 200.0)), 20.0, Some(2.0), at, 1.0);
+        });
+        output.textures_delta.clear();
+        settling
+    }
+
+    #[test]
+    fn the_voice_pointer_settles_only_while_its_smudge_draws_back_at_any_frame_rate() {
+        let ctx = egui::Context::default();
+        let mut pointer = Pointer { enabled: true, size: 8, opacity: 90, ..Pointer::default() };
+        // No smudge: moving or not, nothing of its own to settle (it does not shrink with speed).
+        let mut p = ReadingPointer::default();
+        assert!((1..=40).all(|k| !shown_at(&ctx, &mut p, &pointer, pos2(100.0 + 2.0 * k as f32, 50.0), f64::from(k) / 60.0)));
+        // A smudge: settling while it draws back into a head that stays, as long whether the frames come 60 or 240 a
+        // second or unevenly, when they are asked for.
+        pointer.smudge = 8;
+        let mut lasted = Vec::new();
+        for frames in [&[1.0 / 60.0][..], &[1.0 / 240.0], &[0.004, 0.03, 0.012, 0.06]] {
+            let mut p = ReadingPointer::default();
+            let (mut t, mut x) = (0.0, 100.0);
+            while t < 0.5 {
+                (t, x) = (t + 1.0 / 60.0, x + 2.0);
+                assert!(shown_at(&ctx, &mut p, &pointer, pos2(x, 50.0), t) || t < 0.1);
+            }
+            let (stop, mut k) = (t, 0);
+            while shown_at(&ctx, &mut p, &pointer, pos2(x, 50.0), t) {
+                (t, k) = (t + frames[k % frames.len()], k + 1);
+                assert!(t < stop + 2.0, "settles");
+            }
+            lasted.push(t - stop);
+        }
+        assert!(lasted.iter().all(|d| (d - lasted[0]).abs() < 0.07 && *d <= f64::from(SPEED + RETRACT) + 0.08), "{lasted:?}");
+    }
+
+    #[test]
+    fn a_scroll_moves_the_smudge_by_exactly_the_scroll() {
+        let (mut p, at, now) = moved(line(400.0, 0.5), 0.75, 300.0);
+        let before = smear(&p.path, at, now, 6.0, 0.75, p.tail);
+        assert!(before.len() > 10);
+        let by = vec2(0.0, -37.5);
+        p.scrolled(by);
+        let after = smear(&p.path, at + by, now, 6.0, 0.75, p.tail);
+        assert_eq!(after, before.iter().map(|&(c, w)| (c + by, w)).collect::<Vec<_>>());
+        // The head kept to its word, carried by the scroll: nothing is added to the path behind it.
+        let n = p.path.len();
+        p.trace(at + by, now + f64::from(FRAME), FRAME, true, 0.75, 300.0);
+        assert!(p.path.len() <= n && p.path.back().is_some_and(|&(q, _)| q == at + by));
     }
 }

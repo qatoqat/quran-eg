@@ -31,6 +31,13 @@ dirs = "7"
 cpal = "0.18.2"
 # The voice pointer follows quran-voice's listener (`qv listen`) over a local WebSocket.
 tungstenite = "0.30"
+# The settings tell the installed listener's model and build by the start of their md5, as its README does;
+# the answers kept for reading offline are named by the md5 of their URL.
+md-5 = "0.11"
+
+# The time the installed listener was built, in local time.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # The web build: WebGL through the same glow backend, `fetch` for HTTP.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

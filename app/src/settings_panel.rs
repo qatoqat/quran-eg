@@ -10,6 +10,7 @@ use quran_core::settings::translations::{
 };
 use quran_core::settings::{self, LANGUAGE, MushafFont, PointerShape, Settings, Theme, WbwDisplay};
 
+use crate::fonts::FontStore;
 use crate::kit::{self, Icon, Pill};
 use crate::remote::Remote;
 use crate::theme::Colors;
@@ -23,21 +24,56 @@ pub struct Panel {
     filter: String,
     /// The font source as typed (applied only while it is a usable address).
     font_url: Option<String>,
+    /// "Reset to defaults" was clicked once and waits for its confirmation.
+    confirm_reset: bool,
+    /// The voice pointer's preview (desktop only).
+    #[cfg(not(target_arch = "wasm32"))]
+    preview: crate::voice::Preview,
+    /// Why the voice pointer's motion settings do not take with the listener joined (desktop only; `Voice::lacks`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub listener: Option<&'static str>,
+    /// Which listener is installed (desktop only).
+    #[cfg(not(target_arch = "wasm32"))]
+    installed: crate::voice::Installed,
+    /// What is saved for reading offline (desktop only).
+    #[cfg(not(target_arch = "wasm32"))]
+    offline: crate::offline::Section,
 }
 
 impl Panel {
     pub fn new() -> Self {
-        Self { translations: Remote::new(), filter: String::new(), font_url: None }
+        Self {
+            translations: Remote::new(),
+            filter: String::new(),
+            font_url: None,
+            confirm_reset: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            preview: crate::voice::Preview::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            listener: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            installed: crate::voice::Installed::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            offline: crate::offline::Section::default(),
+        }
+    }
+
+    /// The panel is closed: what only it shows is let go (the preview's texture), and a reset waiting for its
+    /// confirmation is called off.
+    pub fn closed(&mut self) {
+        self.confirm_reset = false;
+        #[cfg(not(target_arch = "wasm32"))]
+        self.preview.close();
     }
 }
 
-fn legend(ui: &mut Ui, text: &str) {
+pub(crate) fn legend(ui: &mut Ui, text: &str) {
     ui.add_space(18.0);
     ui.label(RichText::new(text).size(16.0).strong());
     ui.add_space(2.0);
 }
 
-fn help(ui: &mut Ui, colors: &Colors, text: &str) {
+pub(crate) fn help(ui: &mut Ui, colors: &Colors, text: &str) {
     ui.label(RichText::new(text).size(13.6).color(colors.muted));
 }
 
@@ -45,16 +81,13 @@ fn small_caps(ui: &mut Ui, colors: &Colors, text: &str) {
     ui.label(RichText::new(text.to_uppercase()).size(12.0).color(colors.muted));
 }
 
-/// A row of exclusive choices.
+/// A row of exclusive choices, in a capsule like the header's Surah | Juz | Page.
 fn segmented<T: PartialEq + Copy>(ui: &mut Ui, colors: &Colors, value: &mut T, options: &[(T, &str)]) {
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-        for (option, label) in options {
-            if kit::pill(ui, colors, label, Pill::Segment { on: *value == *option }).clicked() {
-                *value = *option;
-            }
-        }
-    });
+    let labels: Vec<&str> = options.iter().map(|o| o.1).collect();
+    let on = options.iter().position(|o| o.0 == *value);
+    if let Some(i) = kit::segments(ui, colors, &labels, on).clicked() {
+        *value = options[i].0;
+    }
 }
 
 /// A checkbox whose label wraps inside the panel (and toggles it too).
@@ -97,8 +130,10 @@ fn color(ui: &mut Ui, color: &mut String, label: &str) {
 }
 
 impl Panel {
-    /// Show the panel. Returns `true` when it asks to be closed.
-    pub fn show(&mut self, ctx: &egui::Context, screen: Rect, settings: &mut Settings, colors: &Colors, client: &Client) -> bool {
+    /// Show the panel. Returns `true` when it asks to be closed. `page_em` is the page's text size (the voice
+    /// pointer's preview is drawn at it or smaller, in the fonts `fonts` holds).
+    #[allow(clippy::too_many_arguments)]
+    pub fn show(&mut self, ctx: &egui::Context, screen: Rect, settings: &mut Settings, colors: &Colors, client: &Client, fonts: &mut FontStore, page_em: f32) -> bool {
         let now = ctx.input(|i| i.time);
         self.translations.poll(now);
         if self.translations.items.is_empty() && self.translations.error.is_none() {
@@ -125,31 +160,75 @@ impl Panel {
                     ui.label(RichText::new("Settings").size(18.4).strong());
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         close |= kit::icon_button(ui, colors, Icon::Close, false).on_hover_text("Close settings").clicked();
-                        if kit::link(ui, colors, "Reset to defaults", 14.0).clicked() {
-                            *settings = Settings::default();
-                            self.font_url = None;
-                        }
                     });
                 });
             });
             ui.painter().hline(rect.x_range(), ui.cursor().top(), Stroke::new(1.0, colors.border));
-            egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                egui::Frame::new().inner_margin(egui::Margin { left: 18, right: 22, top: 8, bottom: 32 }).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    help(ui, colors, "Changes apply immediately and are saved on this device.");
-                    theme(ui, colors, settings);
-                    mushaf_font(ui, colors, settings);
-                    word_by_word(ui, colors, settings);
-                    self.translation_picker(ui, colors, settings);
-                    sizes(ui, colors, settings);
-                    pointer(ui, colors, settings);
-                    #[cfg(not(target_arch = "wasm32"))]
-                    voice(ui, colors, settings);
-                    self.advanced(ui, colors, settings);
-                });
+            // Docked under the sections (they scroll, it stays): the voice pointer's preview, while its settings are in view.
+            #[cfg(not(target_arch = "wasm32"))]
+            let dock = self.preview.height(ctx, rect);
+            #[cfg(target_arch = "wasm32")]
+            let dock = 0.0;
+            let scroll = egui::ScrollArea::vertical().auto_shrink(false).max_height((ui.available_height() - dock).max(0.0)).show(ui, |ui| {
+                egui::Frame::new()
+                    .inner_margin(egui::Margin { left: 18, right: 22, top: 8, bottom: 32 })
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        self.sections(ui, colors, settings, client)
+                    })
+                    .inner
             });
+            #[cfg(not(target_arch = "wasm32"))]
+            self.preview.show(ui, scroll.inner, scroll.inner_rect.top(), settings, colors, fonts, page_em);
+            #[cfg(target_arch = "wasm32")]
+            let _ = (scroll, fonts, page_em);
         });
         close
+    }
+
+    /// The sections, top to bottom; where the voice pointer's lies on screen (desktop only).
+    fn sections(&mut self, ui: &mut Ui, colors: &Colors, settings: &mut Settings, client: &Client) -> Option<egui::Rangef> {
+        help(ui, colors, "Changes apply immediately and are saved on this device.");
+        theme(ui, colors, settings);
+        mushaf_font(ui, colors, settings);
+        word_by_word(ui, colors, settings);
+        self.translation_picker(ui, colors, settings);
+        sizes(ui, colors, settings);
+        pointer(ui, colors, settings);
+        #[cfg(not(target_arch = "wasm32"))]
+        let voice = Some(voice(ui, colors, settings, self.listener, &mut self.installed));
+        #[cfg(target_arch = "wasm32")]
+        let voice = None;
+        // (A browser keeps its own cache.)
+        #[cfg(not(target_arch = "wasm32"))]
+        self.offline.show(ui, colors, settings, client);
+        #[cfg(target_arch = "wasm32")]
+        let _ = client;
+        self.advanced(ui, colors, settings);
+        self.reset(ui, colors, settings);
+        voice
+    }
+
+    /// Last in the panel and asked twice: next to the close button it was clicked by mistake.
+    fn reset(&mut self, ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
+        legend(ui, "Reset");
+        if !self.confirm_reset {
+            help(ui, colors, "Puts every setting on this device back to its default.");
+            self.confirm_reset = kit::pill(ui, colors, "Reset to defaults…", Pill::Small).clicked();
+            return;
+        }
+        ui.label(RichText::new("Reset every setting to its default? This can’t be undone.").size(13.6).color(colors.danger));
+        ui.horizontal(|ui| {
+            if kit::pill(ui, colors, "Reset", Pill::Primary).clicked() {
+                // (The offer to save for reading offline, once answered, is not made again.)
+                *settings = Settings { offline_offered: settings.offline_offered, ..Settings::default() };
+                self.font_url = None;
+                self.confirm_reset = false;
+            }
+            if kit::pill(ui, colors, "Cancel", Pill::Small).clicked() {
+                self.confirm_reset = false;
+            }
+        });
     }
 
     fn translation_picker(&mut self, ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
@@ -308,8 +387,7 @@ fn word_by_word(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
     ui.add_space(4.0);
     small_caps(ui, colors, "Position");
     ui.add_enabled_ui(wbw.show_translation || wbw.show_transliteration, |ui| {
-        ui.radio_value(&mut wbw.display, WbwDisplay::Inline, "Under each word");
-        ui.radio_value(&mut wbw.display, WbwDisplay::Tooltip, "On hover");
+        segmented(ui, colors, &mut wbw.display, &[(WbwDisplay::Inline, "Under each word"), (WbwDisplay::Tooltip, "On hover")]);
     });
 }
 
@@ -341,6 +419,7 @@ fn pointer(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
     );
     if pointer.enabled {
         pointer_look(ui, colors, pointer, "Size (tenths of a line's height)", 1..=10);
+        range(ui, "Shrink with speed", &mut pointer.shrink, 0..=10, 1, "");
     }
 }
 
@@ -360,7 +439,6 @@ fn pointer_look(ui: &mut Ui, colors: &Colors, pointer: &mut quran_core::settings
         range(ui, "Smudge distance", &mut pointer.smudge_distance, 1..=10, 1, "");
         help(ui, colors, "Smudge smears the pointer along its path while it moves, like motion blur, and draws back into it when it stops.");
     }
-    range(ui, "Shrink with speed", &mut pointer.shrink, 0..=10, 1, "");
     range(ui, "Glow (stronger colours under the pointer; edge blur softens its rim)", &mut pointer.glow, 0..=10, 1, "");
 }
 
@@ -387,10 +465,12 @@ fn glide(ui: &mut Ui, colors: &Colors, title: &str, glide: &mut settings::VoiceG
     millis(ui, "Glide time", &mut glide.ms, 60..=1500, 20);
 }
 
-/// The voice pointer: its dot, the accuracy range around it and how it moves (desktop only).
+/// The voice pointer: its dot, the accuracy range around it and how it moves (desktop only). Returns where it
+/// lies on screen, from under its heading.
 #[cfg(not(target_arch = "wasm32"))]
-fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
+fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings, listener: Option<&str>, installed: &mut crate::voice::Installed) -> egui::Rangef {
     legend(ui, "Voice pointer");
+    let top = ui.cursor().top();
     let voice = &mut settings.voice;
     help(
         ui,
@@ -404,15 +484,27 @@ fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
         help(
             ui,
             colors,
-            "Heard far from where you were being followed (another surah, or more than a page away), the place counts as \
-             lost: the pointer hides and the page stays, in case it was a slip or a mishearing. The reader goes there only if \
-             the recitation is still followed there after this long. Reading on, into the next page or surah too, is followed \
-             at once.",
+            "Heard far from where you were being followed (another surah, or more than a page away), or off the page you \
+             turned to yourself, the place counts as lost: the pointer hides and the page stays, in case it was a slip or a \
+             mishearing. A toast counts this long down before the reader goes there (Go now, Stay); one that sounds \
+             like the ayah you are reading only warns. Reading on, into the next page or surah, is followed at once.",
         );
     }
+    check(ui, &mut voice.tuned, "Tuned movement");
+    help(
+        ui,
+        colors,
+        if voice.tuned {
+            "Set from recitations as the listener hears them: a jump ahead waits until you read on there, and the glides fit \
+             the listener's pace. Off, the motion settings apply as you set them."
+        } else {
+            "Off: the glides, the run-on and the wait below apply as set, and a jump ahead is followed at once."
+        },
+    );
     check(ui, &mut voice.stop_on_closing, "Stop listening at \"sadaqa-llahu-l-'azim\"");
     check(ui, &mut voice.pointer.enabled, "Show the pointer");
     if voice.pointer.enabled {
+        // (Not "shrink with speed": at a reading pace it shrinks by a hundredth.)
         pointer_look(ui, colors, &mut voice.pointer, "Size (tenths of the text size)", 2..=20);
         if voice.pointer.shape == PointerShape::Ring {
             range(ui, "Ring line", &mut voice.ring, 1..=40, 1, " pt");
@@ -436,21 +528,72 @@ fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
     ui.add_space(8.0);
     small_caps(ui, colors, "Motion");
     let m = &mut voice.motion;
-    glide(ui, colors, "Pointer", &mut m.pointer);
-    glide(ui, colors, "Range start (the edge behind the pointer)", &mut m.range_start);
-    glide(ui, colors, "Range end (the edge ahead of it)", &mut m.range_end);
+    if !voice.tuned {
+        glide(ui, colors, "Pointer", &mut m.pointer);
+        glide(ui, colors, "Range start (the edge behind the pointer)", &mut m.range_start);
+        glide(ui, colors, "Range end (the edge ahead of it)", &mut m.range_end);
+    }
     range(ui, "Fade over when going back more than (tenths of a word)", &mut m.fade_back, 3..=50, 1, "");
     range(ui, "Fade over when jumping ahead more than (words)", &mut m.far_jump, 3..=40, 1, "");
-    range(ui, "Run ahead at your pace at most (tenths of a word)", &mut m.max_ahead, 0..=30, 1, "");
-    millis(ui, "Wait before easing back", &mut m.wait_ms, 0..=5000, 100);
-    help(ui, colors, "While the pointer waits, the range reaches back to where you are heard.");
-    check(ui, &mut m.fade_at_ayah_end, "Fade out when you pause at an ayah's end");
-    if m.fade_at_ayah_end {
-        millis(ui, "Fade out after", &mut m.ayah_fade_delay_ms, 0..=10000, 250);
-        help(ui, colors, "0 fades at once. The pointer fades in again wherever you go on.");
+    if !voice.tuned {
+        range(ui, "Run ahead at your pace at most (tenths of a word)", &mut m.max_ahead, 0..=30, 1, "");
+        if m.max_ahead > 0 {
+            millis(ui, "Wait before easing back", &mut m.wait_ms, 0..=5000, 100);
+            help(ui, colors, "While the pointer waits, the range reaches back to where you are heard.");
+        }
     }
+    check(ui, &mut m.fade_at_ayah_end, "Fade out when you pause at an ayah's end");
+    if m.fade_at_ayah_end || m.quiet_dim < 100 {
+        millis(ui, "Fade out after", &mut m.ayah_fade_delay_ms, 0..=10000, 250);
+        help(ui, colors, "0 fades at once. The pointer fades in again wherever you go on; in a silence inside an ayah it dims after the same delay.");
+    }
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new("Experimental").default_open(false).show(ui, |ui| experimental(ui, colors, m, listener));
     ui.add_space(8.0);
     small_caps(ui, colors, "Listener");
     ui.add(egui::TextEdit::singleline(&mut voice.listener).hint_text("~/.local/share/quran-voice").desired_width(f32::INFINITY));
     help(ui, colors, "The folder quran-voice's scripts/install-listener.sh installs to. A listener already running is joined instead.");
+    let (model, qv) = match crate::voice::folder(&voice.listener).map(|dir| installed.lines(ui.ctx(), &dir).cloned()) {
+        Some(Some(lines)) => (lines.model, lines.qv),
+        Some(None) => ("…".into(), "…".into()),
+        None => ("not installed".into(), "not installed".into()),
+    };
+    ui.add_space(2.0);
+    for (what, line) in [("Model", model), ("Listener", qv)] {
+        ui.horizontal_wrapped(|ui| {
+            small_caps(ui, colors, what);
+            ui.add(egui::Label::new(RichText::new(line).size(13.6).color(colors.muted)).selectable(true));
+        });
+    }
+    egui::Rangef::new(top, ui.cursor().top())
+}
+
+/// What was tried and did not pass its tests, off unless chosen (desktop only): tajweed timing from the listener's plans,
+/// the hold and the dim in silence.
+#[cfg(not(target_arch = "wasm32"))]
+fn experimental(ui: &mut Ui, colors: &Colors, m: &mut settings::VoiceMotion, listener: Option<&str>) {
+    check(ui, &mut m.follow_tajweed, "Follow tajweed timing");
+    help(
+        ui,
+        colors,
+        "The listener's plan: the pointer moves letter by letter at your pace, creeps through madd and ghunnah, waits at \
+         a word's end until the next word is heard, and holds while you are quiet. Off, it moves as before.",
+    );
+    if m.follow_tajweed {
+        millis(ui, "Wait at a word's end once what was heard is older than", &mut m.stale_wait_ms, 0..=2000, 50);
+        help(ui, colors, "0 never waits: the pointer goes on into the next word at your pace.");
+        check(ui, &mut m.stop_at_line_end, "Stay on the line until you are heard on the next");
+        check(ui, &mut m.strict_release, "Leave a held letter only when the next letter is heard");
+        check(ui, &mut m.retract, "Step back to the word's end when you stop past it");
+    } else {
+        check(ui, &mut m.hold_when_quiet, "Hold while you are quiet");
+        help(ui, colors, "The pointer runs ahead only while your voice is heard.");
+    }
+    range(ui, "Dim while you are quiet", &mut m.quiet_dim, 0..=100, 5, "%");
+    help(ui, colors, "How bright the pointer stays in a silence inside an ayah (100% never dims), after the fade's delay.");
+    check(ui, &mut m.continuous_scroll, "Continuous scroll: keep the line read a third of the way down");
+    help(ui, colors, "The page moves a line for each line read. Off, it moves when the line nears the foot of the view, and before you reach a line that is not in view.");
+    if let Some(why) = listener {
+        help(ui, colors, why);
+    }
 }

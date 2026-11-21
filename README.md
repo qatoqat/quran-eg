@@ -102,12 +102,37 @@ it fades in wherever you go on instead of gliding over the ayah's mark. The
 listener's output goes to `listen.log` in its folder; the previous sessions' logs
 are `listen.1.log` … `listen.5.log`.
 
+With "Follow tajweed timing" the app asks the listener for its plan (how the next half
+second of the reading goes) and the voice's level, and the pointer moves letter by letter
+at your pace, creeps through madd and ghunnah and waits at a word's end until the next
+word is heard; it stays on the line you are heard on until you are heard on the next,
+rests where you stop, can step back to the word's end when you stop past it, and holds
+while you are quiet: after a second of silence nothing the listener hears in the room
+moves it on. "Hold while you are quiet" does that last part without the plan, and "Dim
+while you are quiet" dims the pointer in a silence as long as the fade's delay. Off (as
+they are by default), the pointer moves as before; an older listener sends neither plan
+nor level, and Voice › Motion says so.
+
 A place heard far from where the recitation was being followed (another surah, or
 more than about a page away) counts as lost for a while (5 s by default): the
 pointer hides and the page stays, in case it was a slip or a mishearing, and the
 title bar says so. The reader goes there only if the recitation keeps being followed
 there, reading on, for that long; reading on into the next page or surah is followed
 as before.
+
+While the voice pointer's settings are in view (their heading above it), a preview
+sits at the foot of the settings panel: a scripted reading of 1:6–1:7 in the page's
+own glyphs, heard by a scripted listener and drawn by the same pointer code as the
+page, at the page's pace. Its timeline has six scenes (all three lines read with a
+breath, an ayah's end, a held letter, slips, a mishearing, reading on elsewhere); the
+chosen one plays over and over, a changed setting goes to the scene where it acts, a
+pause or a hold lasts as long as its setting needs to be seen, and the line under the
+text says what the pointer decided. In a lane under each line the ticks are where the
+listener heard you and the caret where you are; "Even" hears every step alike, "As
+heard" in bursts as quran-voice does, so a stutter can be told apart from the curves.
+It is a miniature (its scale is shown): on the page the pointer moves further in the
+same time. It plays only while in view and unfolded, at a few frames a second while
+nothing in it moves.
 
 ### Install on Arch Linux
 

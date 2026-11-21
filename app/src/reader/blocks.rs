@@ -26,8 +26,8 @@ const BISMILLAH: &str = "بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱ
 
 /// Sizes of fallback text relative to the glyph em (as in quran-dx's stylesheet).
 const QPC_EM: f32 = 0.82;
-const UTHMANI_EM: f32 = 0.8;
-const NUMBER_EM: f32 = 0.5;
+pub const UTHMANI_EM: f32 = 0.8;
+pub const NUMBER_EM: f32 = 0.5;
 pub const BANNER_NAME_EM: f32 = 0.6;
 pub const BANNER_SIDE_EM: f32 = 0.34;
 /// Sizes the ornamental banner's frame and name are drawn at (they are then

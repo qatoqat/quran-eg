@@ -204,3 +204,27 @@ fn opening_at_a_position_puts_its_line_at_the_top() {
     bench.frames(2);
     assert!(bench.reader.pending.is_none() && bench.reader.position.unwrap().top);
 }
+
+#[test]
+fn a_bismillah_line_is_four_places_for_the_voice_pointer_and_its_surah_head_can_be_gone_to() {
+    let mut bench = Bench::new(sixty_verses());
+    bench.frames(3);
+    let words = &bench.reader.words;
+    let first = words.iter().position(|w| w.0 == (2, 1, 1)).unwrap();
+    let line: Vec<_> = words[..first].iter().map(|w| w.0).collect();
+    assert_eq!(line, [(2, 0, 1), (2, 0, 2), (2, 0, 3), (2, 0, 4)], "just before the surah's first word");
+    // Its one placeholder in quarters, right to left, above the first line.
+    let b = &words[..first];
+    assert!(b.windows(2).all(|p| (p[1].1.right() - p[0].1.left()).abs() < 0.01) && b[0].1.bottom() <= words[first].1.top());
+    // From further on, the surah's head comes into view with its first word.
+    bench.reader.scroll = 2500.0;
+    bench.frames(2);
+    bench.reader.go_to_head(2);
+    bench.frames(3);
+    let line = bench.reader.words.iter().find(|w| w.0 == (2, 0, 1)).expect("the Bismillah line is painted");
+    assert!(line.1.top() > 0.0, "{:?} in view", line.1);
+    // A word gone to is at the top: the line above it is not in view.
+    bench.reader.go_to(Some(WordRef { chapter: 2, verse: 1, word: 1 }));
+    bench.frames(3);
+    assert!(bench.reader.words.iter().find(|w| w.0 == (2, 0, 1)).is_none_or(|w| w.1.top() < 0.0));
+}

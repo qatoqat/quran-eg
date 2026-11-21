@@ -2,10 +2,10 @@
 //! left; in the middle the view's title, or the search box while searching; on
 //! the right a search button, the Surah | Juz | Page toggle and the settings button.
 
-use egui::{Align, FontId, Layout, Rect, Sense, Stroke, StrokeKind, Ui, UiBuilder, pos2, vec2};
+use egui::{Align, FontId, Layout, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use quran_core::view::{Location, Mode, View};
 
-use crate::kit::{self, Icon, Mic, Pill};
+use crate::kit::{self, Icon, Mic};
 use crate::reader::Env;
 use crate::search::{Go, SearchBox};
 use crate::theme::Colors;
@@ -139,22 +139,10 @@ pub fn show(ui: &mut Ui, env: &mut Env<'_>, search: &mut SearchBox, input: Heade
 /// Surah | Juz | Page: the current mode's button is filled; the hovered one
 /// says where it leads, in a tooltip under the toggle.
 fn toggle(ui: &mut Ui, colors: &Colors, mode: Option<Mode>, targets: &[(Location, String); 3]) -> Option<Location> {
-    let sizes = Mode::ALL.map(|m| kit::pill_size(ui, m.label(), Pill::Segment { on: false }, kit::Arrow::None));
-    let size = vec2(sizes.iter().map(|s| s.x).sum::<f32>() + 6.0, sizes[0].y + 6.0);
-    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
-    ui.painter().rect(rect, 255, colors.bg, Stroke::new(1.0, colors.border), StrokeKind::Inside);
-    let mut go = None;
-    ui.scope_builder(UiBuilder::new().max_rect(rect.shrink(3.0)).layout(Layout::left_to_right(Align::Center)), |ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        for (m, (to, tip)) in Mode::ALL.iter().zip(targets) {
-            let button = kit::pill(ui, colors, m.label(), Pill::Segment { on: Some(*m) == mode });
-            if button.hovered() || button.has_focus() {
-                kit::tip(ui.ctx(), colors, rect, &[(tip, false)], true);
-            }
-            if button.clicked() {
-                go = Some(*to);
-            }
-        }
-    });
-    go
+    let on = mode.and_then(|mode| Mode::ALL.iter().position(|m| *m == mode));
+    let toggle = kit::segments(ui, colors, &Mode::ALL.map(|m| m.label()), on);
+    if let Some(i) = toggle.hovered() {
+        kit::tip(ui.ctx(), colors, toggle.rect, &[(&targets[i].1, false)], true);
+    }
+    toggle.clicked().map(|i| targets[i].0)
 }

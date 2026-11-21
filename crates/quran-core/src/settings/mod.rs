@@ -152,6 +152,9 @@ pub struct Voice {
     pub motion: VoiceMotion,
     /// Keep the line being read in view.
     pub auto_scroll: bool,
+    /// Tuned movement: the glides and the run-on are set for recitation as the listener hears it, and a jump ahead is
+    /// held until the reading goes on there; off, `motion` applies as set.
+    pub tuned: bool,
     /// How long a place heard far from where the recitation was being followed must keep being followed
     /// before the reader goes there, ms 0..=20000 (0 = as any other place); until then it counts as
     /// lost: a slip, or the listener's mistake.
@@ -174,6 +177,7 @@ impl Default for Voice {
             range: VoiceRange::default(),
             motion: VoiceMotion::default(),
             auto_scroll: true,
+            tuned: true,
             far_wait_ms: 5000,
             stop_on_closing: true,
             listener: String::new(),
@@ -211,14 +215,14 @@ impl Default for VoiceRange {
 /// How the voice pointer eases toward a new place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum VoiceCurve {
-    /// Exponential approach: fast at first, settling softly.
+    /// Exponential approach: fast at first, settling softly. The ease-out and ease-in-out curves of
+    /// before were dropped as not useful; settings naming them get this one.
     #[default]
+    #[serde(alias = "EaseOut", alias = "EaseInOut")]
     Smooth,
     /// A critically damped spring: starts gently, no overshoot.
     Spring,
     Linear,
-    EaseOut,
-    EaseInOut,
 }
 
 /// How one moving part of the voice pointer eases to a new place.
@@ -255,8 +259,30 @@ pub struct VoiceMotion {
     pub wait_ms: u16,
     /// Fade out at an ayah's end while the reader pauses there, and in where they go on.
     pub fade_at_ayah_end: bool,
-    /// How long the reader must have paused there before it fades, ms 0..=10000 (0 = at once).
+    /// How long the reader must have paused there before it fades, ms 0..=10000 (0 = at once); in a silence inside an
+    /// ayah, how long before it dims (`quiet_dim`).
     pub ayah_fade_delay_ms: u16,
+    /// Follow the listener's tajweed-timed plan (quran-voice's DESIGN §35), asked of it with the voice's level: creep
+    /// through madd and ghunnah at the reader's pace, wait at a word's end for the next word to be heard, rest where the
+    /// reader stops, hold while they are quiet. Needs a listener that can plan; off, the pointer moves as before.
+    pub follow_tajweed: bool,
+    /// Without tajweed timing: the run-on counts only while the reader's voice is heard (the listener asked for its
+    /// level).
+    pub hold_when_quiet: bool,
+    /// Percent of its opacity the pointer dims to in a silence of `ayah_fade_delay_ms`, 0..=100 (100 = never).
+    pub quiet_dim: u8,
+    /// With tajweed timing: once the evidence is this old, the pointer waits at the word's end for the next, ms
+    /// 0..=2000 (0 = never).
+    pub stale_wait_ms: u16,
+    /// With tajweed timing: the pointer stays on the line the reader is heard on until they are heard on the next.
+    pub stop_at_line_end: bool,
+    /// With tajweed timing: a held letter is left only when the next letter is heard, never at its expected end.
+    pub strict_release: bool,
+    /// With tajweed timing: when the voice drops with the pointer past the word heard, it steps back to that word's end.
+    pub retract: bool,
+    /// Scroll continuously, keeping the line read a third of the way down (the page moves a line for each line read),
+    /// instead of turning to the next lines when the line being read nears the foot of the view.
+    pub continuous_scroll: bool,
 }
 
 impl Default for VoiceMotion {
@@ -271,6 +297,14 @@ impl Default for VoiceMotion {
             wait_ms: 1500,
             fade_at_ayah_end: true,
             ayah_fade_delay_ms: 1000,
+            follow_tajweed: false,
+            hold_when_quiet: false,
+            quiet_dim: 100,
+            stale_wait_ms: 550,
+            stop_at_line_end: true,
+            strict_release: false,
+            retract: false,
+            continuous_scroll: false,
         }
     }
 }
@@ -378,6 +412,9 @@ pub struct Settings {
     pub custom_theme: CustomTheme,
     pub pointer: Pointer,
     pub voice: Voice,
+    /// The offer to save the Quran for reading offline has been answered, or saving was started: it is made once
+    /// (settings of before have not seen it).
+    pub offline_offered: bool,
 }
 
 impl Default for Settings {
@@ -399,6 +436,7 @@ impl Default for Settings {
             custom_theme: CustomTheme::default(),
             pointer: Pointer::default(),
             voice: Voice::default(),
+            offline_offered: false,
         }
     }
 }

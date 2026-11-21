@@ -2,12 +2,16 @@
 
 use std::sync::Arc;
 
-use egui::{Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, Vec2, pos2, vec2};
+use egui::{Align, Align2, Color32, CornerRadius, CursorIcon, FontId, Galley, Layout, Painter, Pos2, Rect, Response, Sense, Shape, Stroke, StrokeKind, Ui, UiBuilder, Vec2, pos2, vec2};
 
 use crate::theme::Colors;
 
 pub fn galley(ui: &Ui, text: &str, size: f32, color: Color32, wrap: f32) -> Arc<Galley> {
-    ui.painter().layout(text.to_owned(), FontId::proportional(size), color, wrap)
+    layout(ui.painter(), text, size, color, wrap)
+}
+
+fn layout(painter: &Painter, text: &str, size: f32, color: Color32, wrap: f32) -> Arc<Galley> {
+    painter.layout(text.to_owned(), FontId::proportional(size), color, wrap)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,7 +20,7 @@ pub enum Pill {
     Outline,
     /// Filled with the accent (the main action).
     Primary,
-    /// A segment of a toggle: filled with the accent when `on`.
+    /// A segment of a toggle: filled with the accent when `on` (in a capsule: `segments`).
     Segment { on: bool },
     /// A small outlined action (copy, clear).
     Small,
@@ -34,7 +38,7 @@ pub enum Arrow {
     Right,
 }
 
-const ARROW: f32 = 20.0;
+const ARROW: f32 = 24.0;
 
 /// Size of a pill with this text.
 pub fn pill_size(ui: &Ui, text: &str, style: Pill, arrow: Arrow) -> Vec2 {
@@ -47,11 +51,11 @@ impl Pill {
     /// Font size and padding.
     fn metrics(self) -> (f32, Vec2) {
         match self {
-            Pill::Outline => (14.4, vec2(15.0, 6.5)),
+            Pill::Outline => (16.0, vec2(20.0, 10.0)),
             Pill::Primary => (15.0, vec2(26.0, 9.0)),
             Pill::Segment { .. } => (14.4, vec2(13.0, 3.5)),
-            Pill::Small => (12.8, vec2(10.0, 3.0)),
-            Pill::Tag => (13.6, vec2(9.0, 2.5)),
+            Pill::Small => (13.6, vec2(12.0, 4.0)),
+            Pill::Tag => (13.6, vec2(10.0, 4.0)),
         }
     }
 }
@@ -63,8 +67,13 @@ pub fn pill(ui: &mut Ui, colors: &Colors, text: &str, style: Pill) -> Response {
 
 pub fn arrow_pill(ui: &mut Ui, colors: &Colors, text: &str, style: Pill, arrow: Arrow) -> Response {
     let (size, pad) = style.metrics();
-    let extra = if arrow == Arrow::None { 0.0 } else { ARROW };
     let text = galley(ui, text, size, Color32::PLACEHOLDER, f32::INFINITY);
+    padded_pill(ui, colors, text, pad, style, arrow)
+}
+
+/// A pill of `text` (laid out in `Color32::PLACEHOLDER`, painted in the style's ink) padded by `pad`.
+fn padded_pill(ui: &mut Ui, colors: &Colors, text: Arc<Galley>, pad: Vec2, style: Pill, arrow: Arrow) -> Response {
+    let extra = if arrow == Arrow::None { 0.0 } else { ARROW };
     let (rect, response) = ui.allocate_exact_size(text.size() + 2.0 * pad + vec2(extra, 0.0), Sense::click());
     let hot = response.hovered() || response.has_focus();
     let (fill, stroke, ink) = match style {
@@ -95,13 +104,85 @@ pub fn arrow_pill(ui: &mut Ui, colors: &Colors, text: &str, style: Pill, arrow: 
             Arrow::Right => (Some(pos2(rect.right() - pad.x, rect.center().y)), -1.0),
         };
         if let Some(tip) = tip {
-            let stroke = Stroke::new(1.4, ink);
-            ui.painter().line_segment([tip, tip + vec2(back * 12.0, 0.0)], stroke);
-            ui.painter().line_segment([tip, tip + vec2(back * 4.5, -4.5)], stroke);
-            ui.painter().line_segment([tip, tip + vec2(back * 4.5, 4.5)], stroke);
+            let stroke = Stroke::new(1.6, ink);
+            ui.painter().line_segment([tip, tip + vec2(back * 14.0, 0.0)], stroke);
+            ui.painter().line_segment([tip, tip + vec2(back * 5.0, -5.0)], stroke);
+            ui.painter().line_segment([tip, tip + vec2(back * 5.0, 5.0)], stroke);
         }
     }
     response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// The capsule's margin around its segments.
+const INSET: f32 = 3.0;
+/// The least padding either side of a segment's label, where a row is short of room.
+const TIGHT: f32 = 7.0;
+
+/// A capsule of exclusive choices, as the header's Surah | Juz | Page: segments on the page's colour in a thin border,
+/// the chosen one filled with the accent. Laid out once, to be sized and placed before it is shown.
+pub struct Capsule {
+    texts: Vec<Arc<Galley>>,
+    pad: Vec2,
+    inset: f32,
+    size: Vec2,
+}
+
+/// A capsule shown: its rect and its segments' buttons.
+pub struct Segments {
+    pub rect: Rect,
+    pub buttons: Vec<Response>,
+}
+
+impl Segments {
+    pub fn hovered(&self) -> Option<usize> {
+        self.buttons.iter().position(|b| b.hovered() || b.has_focus())
+    }
+
+    pub fn clicked(&self) -> Option<usize> {
+        self.buttons.iter().position(Response::clicked)
+    }
+}
+
+impl Capsule {
+    /// `labels` at `scale` times the header's size, their padding narrowed (down to `TIGHT`) to fit `width`.
+    pub fn new(painter: &Painter, labels: &[&str], scale: f32, width: f32) -> Capsule {
+        let (size, pad) = Pill::Segment { on: false }.metrics();
+        let texts: Vec<_> = labels.iter().map(|l| layout(painter, l, size * scale, Color32::PLACEHOLDER, f32::INFINITY)).collect();
+        let words: f32 = texts.iter().map(|t| t.size().x).sum();
+        let sides = 2.0 * labels.len().max(1) as f32;
+        let inset = INSET * scale;
+        let fit = (width - 2.0 * inset - words) / sides;
+        let pad = vec2((pad.x * scale).min(fit).max(TIGHT * scale), pad.y * scale);
+        let high = texts.iter().map(|t| t.size().y).fold(0.0, f32::max);
+        let size = vec2(words + sides * pad.x, high + 2.0 * pad.y) + Vec2::splat(2.0 * inset);
+        Capsule { texts, pad, inset, size }
+    }
+
+    /// (Only the toasts, which the web build has not, size one before showing it.)
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub fn size(&self) -> Vec2 {
+        self.size
+    }
+
+    /// Shows the capsule where `ui` puts the next widget; segment `on` is the chosen one.
+    pub fn show(&self, ui: &mut Ui, colors: &Colors, on: Option<usize>) -> Segments {
+        let (rect, _) = ui.allocate_exact_size(self.size, Sense::hover());
+        ui.painter().rect(rect, CornerRadius::same(255), colors.bg, Stroke::new(1.0, colors.border), StrokeKind::Inside);
+        let inner = rect.shrink(self.inset);
+        let buttons = ui
+            .scope_builder(UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)), |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let pill = |(i, text): (usize, &Arc<Galley>)| padded_pill(ui, colors, text.clone(), self.pad, Pill::Segment { on: on == Some(i) }, Arrow::None);
+                self.texts.iter().enumerate().map(pill).collect()
+            })
+            .inner;
+        Segments { rect, buttons }
+    }
+}
+
+/// A capsule of `labels` at the header's size, in the width `ui` has.
+pub fn segments(ui: &mut Ui, colors: &Colors, labels: &[&str], on: Option<usize>) -> Segments {
+    Capsule::new(ui.painter(), labels, 1.0, ui.available_width()).show(ui, colors, on)
 }
 
 /// Text that acts as a link.

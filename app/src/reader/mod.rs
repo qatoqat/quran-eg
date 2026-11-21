@@ -31,7 +31,11 @@ use quran_core::view::{Location, Position, View, WordRef};
 
 use self::blocks::{Block, SheetResult, block_key};
 #[cfg(not(target_arch = "wasm32"))]
-pub use self::paint::Slot;
+pub use self::blocks::{NUMBER_EM, UTHMANI_EM};
+#[cfg(not(target_arch = "wasm32"))]
+pub use self::paint::{Slot, baseline, placeholder, quads, ring};
+#[cfg(not(target_arch = "wasm32"))]
+pub use self::place::RINGED_EM;
 use self::place::Metrics;
 use crate::fonts::FontStore;
 use crate::pointer::Lens;
@@ -40,6 +44,8 @@ use crate::theme::Colors;
 
 /// Padding of the content column (quran-dx's `.site-main`).
 pub const COLUMN_PAD: f32 = 19.2;
+/// What a centred line without meanings adds to the space between words, in em.
+pub const LOOSE_GAP: f32 = 0.1;
 /// Sheets are not drawn larger than this many pixels per em (bigger text is scaled up).
 const MAX_PX_PER_EM: f32 = 192.0;
 /// A sheet is redrawn at a new size once the size has stayed put this long.
@@ -81,7 +87,7 @@ fn metrics_for(s: &Settings, muted: egui::Color32, column: f32, widest: Option<f
         em,
         line_width: widest.map_or(column, |w| (w * fit).min(column)),
         word_gap: em * (word_gap + if meanings { 0.18 } else { 0.0 }),
-        loose_gap: em * (word_gap + if meanings { 0.18 } else { 0.1 }),
+        loose_gap: em * (word_gap + if meanings { 0.18 } else { LOOSE_GAP }),
         line_gap: em * settings::line_gap(s.line_spacing),
         meaning_gap: em * settings::meaning_gap(s.meaning_spacing),
         meaning_font: settings::meaning_font_px(s.translation_font_scale) * fit,
@@ -117,6 +123,9 @@ pub struct Reader {
     scroll: f32,
     /// A position to open at, until its verse has loaded.
     pending: Option<WordRef>,
+    /// The position is a surah's first word gone to for the basmala that opens it (the voice pointer): its banner
+    /// and Bismillah line come into view with it.
+    head: bool,
     /// Heights of what is above and below the pages, as measured last frame.
     top_height: f32,
     bottom_height: f32,
@@ -135,6 +144,12 @@ pub struct Reader {
     notes: verses::Notes,
     /// The words painted last frame, in reading order, with their boxes (for the voice pointer).
     pub words: Vec<paint::Slot>,
+    /// The reader moved the view themselves this frame (wheel, keys, the scroll bar), for the voice pointer.
+    pub touched: bool,
+    /// Loading out of sight (where the voice pointer goes next): it takes no input.
+    quiet: bool,
+    /// The height of the view when last drawn.
+    seen_height: f32,
 }
 
 impl Reader {
@@ -149,8 +164,14 @@ impl Reader {
     /// Scroll to a position in this view (loading up to it if need be).
     pub fn go_to(&mut self, at: Option<WordRef>) {
         if at.is_some() {
-            self.pending = at;
+            (self.pending, self.head) = (at, false);
         }
+    }
+
+    /// Scroll to the start of a surah, its banner and Bismillah line in view (the voice pointer hears its basmala).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn go_to_head(&mut self, chapter: u16) {
+        (self.pending, self.head) = (Some(WordRef { chapter, verse: 1, word: 1 }), true);
     }
 
     /// Scroll by `dy` points (the voice pointer keeping the line being read in view).
@@ -159,10 +180,55 @@ impl Reader {
         self.scroll = (self.scroll + dy).max(0.0);
     }
 
-    /// Whether this view has loaded the verse (`"2:255"`).
+    /// Loading out of sight (`quiet`), it takes no input; shown, it does.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn has_verse(&self, verse_key: &str) -> bool {
-        self.feed.has_verse(verse_key)
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.quiet = quiet;
+    }
+
+    /// Whether what the view shows is laid out and has its glyphs: the place it was opened at reached, and every page
+    /// in sight drawn.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn ready(&self) -> bool {
+        if self.pending.is_some() || self.seen_height <= 0.0 || !self.blocks.iter().any(|b| b.placed.is_some()) {
+            return false;
+        }
+        let (from, to) = (self.scroll, self.scroll + self.seen_height);
+        let mut y = self.top_height;
+        self.blocks.iter().all(|b| {
+            let (top, bottom) = (y, y + b.height);
+            y = bottom;
+            bottom <= from || top >= to || (b.placed.is_some() && b.sheet.is_some())
+        })
+    }
+
+    /// The pages it holds.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pages(&self) -> Vec<u16> {
+        self.blocks.iter().filter_map(|b| b.page.page).collect()
+    }
+
+    /// Whether the word is on the last `n` lines of the view's last page (the voice pointer readying the next one).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn on_last_lines(&self, at: WordRef, n: usize) -> bool {
+        use quran_core::mushaf_layout::Item;
+        let location = at.location();
+        let Some(block) = self.blocks.last() else { return false };
+        let lines = block.page.items.iter().filter_map(|item| match item {
+            Item::Line { cells, .. } => Some(cells),
+            _ => None,
+        });
+        let lines: Vec<_> = lines.collect();
+        lines.iter().rev().take(n).any(|cells| cells.iter().any(|c| c.location == location))
+    }
+
+    /// Whether this view shows the word (a page's shows only the words printed on it, of a verse over a page turn too).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn has_word(&self, at: WordRef) -> bool {
+        let location = at.location();
+        use quran_core::mushaf_layout::Item;
+        let holds = |item: &Item| matches!(item, Item::Line { cells, .. } | Item::Flow { cells, .. } if cells.iter().any(|c| c.location == location));
+        self.blocks.iter().any(|b| b.page.items.iter().any(holds))
     }
 
     /// A view that has not asked for anything yet.
@@ -181,6 +247,7 @@ impl Reader {
             column: settings::content_width_px(env.settings.content_width) as f32 - 2.0 * COLUMN_PAD,
             scroll: 0.0,
             pending: None,
+            head: false,
             top_height: 0.0,
             bottom_height: 0.0,
             style: 0,
@@ -192,6 +259,9 @@ impl Reader {
             reported: 0.0,
             notes: verses::Notes::default(),
             words: Vec::new(),
+            touched: false,
+            quiet: false,
+            seen_height: 0.0,
         }
     }
 
@@ -226,7 +296,7 @@ impl Reader {
         }
         self.error = None;
         let (source, generation) = (self.feed.source, self.generation);
-        self.fetch = Some(crate::net::call(ctx, source.call(client, &self.query, page), move |answer| {
+        self.fetch = Some(crate::net::verses(ctx, client, source, &self.query, page, move |answer| {
             let verses = answer.and_then(|response| source.accept(page, response));
             (generation, page, verses.map_err(|e| e.to_string()))
         }));
@@ -369,9 +439,12 @@ impl Reader {
         let metrics = self.metrics(env);
         self.line_height = metrics.line_height();
         let view = area.height();
+        self.seen_height = view;
 
         self.open_pending(&ctx, env, &metrics);
-        self.scroll_input(ui, area);
+        if !self.quiet {
+            self.scroll_input(ui, area);
+        }
         self.place_near(&ctx, env, &metrics, view);
         let pages: f32 = self.blocks.iter().map(|b| b.height).sum();
         let total = self.top_height + pages + self.bottom_height;
@@ -389,11 +462,14 @@ impl Reader {
         self.paint_pages(ui, env, &metrics, space, pages_top, &mut open);
         self.bottom_chrome(ui, env, space, pages_top + pages, &mut open);
         if let Some(offset) = crate::kit::scroll_bar(ui, env.colors, area, self.scroll, total) {
-            self.scroll = offset;
+            (self.scroll, self.touched) = (offset, true);
         }
 
         self.track_position(&metrics);
-        self.release_far(env, view);
+        // Out of sight it holds one page, and frees nothing of the view shown.
+        if !self.quiet {
+            self.release_far(env, view);
+        }
         self.report(&ctx, env);
         // Load the next verses before the reader reaches the end of what is there.
         if self.scroll + view * 2.5 > total && self.error.is_none() && self.pending.is_none() {

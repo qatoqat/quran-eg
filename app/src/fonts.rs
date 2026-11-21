@@ -40,9 +40,9 @@ enum Loaded {
 
 /// Where the surah banner's two ornament fonts come from (QUL, the Quranic
 /// Universal Library). QUL lists no licence for them, so they are fetched, not bundled.
-const ORNAMENT_BASE: &str = "https://static-cdn.tarteel.ai/qul/fonts";
-const ORNAMENT_FRAME: &str = "common/quran-common.ttf";
-const ORNAMENT_NAMES: &str = "surah-names/v4/surah-name-v4.ttf";
+pub(crate) const ORNAMENT_BASE: &str = "https://static-cdn.tarteel.ai/qul/fonts";
+pub(crate) const ORNAMENT_FRAME: &str = "common/quran-common.ttf";
+pub(crate) const ORNAMENT_NAMES: &str = "surah-names/v4/surah-name-v4.ttf";
 
 pub struct FontStore {
     ctx: egui::Context,
@@ -55,6 +55,8 @@ pub struct FontStore {
     ornaments: Option<Status<Ornaments>>,
     tx: Sender<Loaded>,
     rx: Receiver<Loaded>,
+    /// Pages a view loading out of sight holds (the voice pointer's next page): kept whatever the view shown frees.
+    pinned: Vec<u16>,
 }
 
 impl FontStore {
@@ -79,6 +81,7 @@ impl FontStore {
             ornaments: None,
             tx,
             rx,
+            pinned: Vec::new(),
         }
     }
 
@@ -177,9 +180,16 @@ impl FontStore {
         matches!(self.fallback, Some(Status::Failed))
     }
 
-    /// Free the loaded page fonts `keep` doesn't want (pages far from the viewport).
+    /// Free the loaded page fonts `keep` doesn't want (pages far from the viewport), but for the pinned ones.
     pub fn retain_pages(&mut self, keep: impl Fn(FontSet, u16) -> bool) {
-        self.pages.retain(|&(set, page), status| !matches!(status, Status::Ready(_)) || keep(set, page));
+        let pinned = &self.pinned;
+        self.pages.retain(|&(set, page), status| !matches!(status, Status::Ready(_)) || keep(set, page) || pinned.contains(&page));
+    }
+
+    /// The pages of a view loading out of sight, to keep (none: nothing loads).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn pin(&mut self, pages: Vec<u16>) {
+        self.pinned = pages;
     }
 
     pub fn failed_pages(&self, set: FontSet) -> Vec<u16> {
@@ -235,7 +245,7 @@ struct Source {
 }
 
 /// Largest font file accepted (the biggest page font is well under 1 MB).
-const MAX_FONT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const MAX_FONT_BYTES: usize = 8 * 1024 * 1024;
 
 /// Get the font at `path` and hand it to `done`: from the cache, else from the
 /// first base that has a file `parse` accepts (which is then cached). A cached

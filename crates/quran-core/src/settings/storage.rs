@@ -134,6 +134,8 @@ pub fn normalize(s: &mut Settings) {
     motion.max_ahead = motion.max_ahead.min(30);
     motion.wait_ms = motion.wait_ms.min(5000);
     motion.ayah_fade_delay_ms = motion.ayah_fade_delay_ms.min(10000);
+    motion.quiet_dim = motion.quiet_dim.min(100);
+    motion.stale_wait_ms = motion.stale_wait_ms.min(2000);
     let mut seen = std::collections::HashSet::new();
     s.translations.retain(|id| seen.insert(*id));
     s.font_base_url = sanitize_font_base_url(&s.font_base_url).unwrap_or_default();
@@ -236,13 +238,16 @@ mod backend {
     }
 
     /// Atomically write `bytes` to `path`: create the parent directory, write a
-    /// sibling temp file, then rename it over the target.
+    /// sibling temp file of this write's own (two threads or processes writing
+    /// the same file never share one), then rename it over the target.
     pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
-        tmp_name.push(".tmp");
+        let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tmp_name.push(format!(".{}-{n}.tmp", std::process::id()));
         let tmp = path.with_file_name(tmp_name);
         let result = (|| {
             let mut file = std::fs::File::create(&tmp)?;
@@ -333,6 +338,7 @@ mod tests {
         assert_eq!((m.pointer, m.range_start, m.range_end), (glide, glide, glide));
         assert!(m.fade_at_ayah_end);
         assert_eq!((m.ayah_fade_delay_ms, s.voice.far_wait_ms, s.voice.range.blur), (1000, 5000, 0));
+        assert!(s.voice.tuned, "settings of before get tuned movement, their own motion kept for when it is off");
         // The voice pointer's longest trail and thickest ring of before.
         let s = from_json(r#"{"voice":{"pointer":{"trail":4,"trail_distance":7},"ring":20}}"#).unwrap();
         assert_eq!((s.voice.pointer.smudge, s.voice.pointer.smudge_distance, s.voice.ring), (7, 7, 20));
@@ -349,11 +355,23 @@ mod tests {
 
     #[test]
     fn new_keys_win_over_old_ones_beside_them() {
-        let both = r#"{"pointer":{"trail":3,"smudge":1,"trail_distance":9},"voice":{"motion":{"curve":"Spring","glide_ms":900,"pointer":{"curve":"EaseOut","ms":200}}}}"#;
+        let both = r#"{"pointer":{"trail":3,"smudge":1,"trail_distance":9},"voice":{"motion":{"curve":"Spring","glide_ms":900,"pointer":{"curve":"Linear","ms":200}}}}"#;
         let s = from_json(both).unwrap();
         assert_eq!((s.pointer.smudge, s.pointer.smudge_distance), (1, 9));
-        assert_eq!(s.voice.motion.pointer, VoiceGlide { curve: VoiceCurve::EaseOut, ms: 200 });
+        assert_eq!(s.voice.motion.pointer, VoiceGlide { curve: VoiceCurve::Linear, ms: 200 });
         assert_eq!(s.voice.motion.range_start, VoiceGlide::default(), "the new shape is taken as it is");
+    }
+
+    #[test]
+    fn a_removed_curve_loads_as_smooth() {
+        let old = r#"{"voice":{"motion":{"pointer":{"curve":"EaseOut","ms":200},"range_start":{"curve":"EaseInOut","ms":900},"range_end":{"curve":"Spring"}}}}"#;
+        let m = from_json(old).unwrap().voice.motion;
+        assert_eq!((m.pointer, m.range_start), (VoiceGlide { curve: VoiceCurve::Smooth, ms: 200 }, VoiceGlide { curve: VoiceCurve::Smooth, ms: 900 }));
+        assert_eq!(m.range_end.curve, VoiceCurve::Spring);
+        // The one curve of before, too, and it is written back under its new name.
+        let s = from_json(r#"{"voice":{"motion":{"curve":"EaseInOut","glide_ms":500}}}"#).unwrap();
+        assert_eq!(s.voice.motion.range_end, VoiceGlide { curve: VoiceCurve::Smooth, ms: 500 });
+        assert!(to_json(&s).contains(r#""curve":"Smooth""#) && !to_json(&s).contains("Ease"));
     }
 
     #[test]
@@ -385,8 +403,10 @@ mod tests {
         voice.range.blur = 7;
         voice.motion.pointer = VoiceGlide { curve: VoiceCurve::Spring, ms: 900 };
         voice.motion.range_start = VoiceGlide { curve: VoiceCurve::Linear, ms: 1500 };
-        voice.motion.range_end = VoiceGlide { curve: VoiceCurve::EaseInOut, ms: 60 };
+        voice.motion.range_end = VoiceGlide { curve: VoiceCurve::Smooth, ms: 60 };
         voice.motion.fade_at_ayah_end = false;
+        voice.tuned = false;
+        voice.motion.continuous_scroll = true;
         voice.motion.ayah_fade_delay_ms = 2500;
         assert_eq!(from_json(&to_json(&s)), Some(s));
         assert_eq!(from_json("{}"), Some(Settings::default()));
@@ -425,6 +445,14 @@ mod tests {
     }
 
     #[test]
+    fn the_offline_offer_is_made_once() {
+        // Settings of before have not seen it; once answered, it stays answered.
+        assert!(!from_json(r#"{"theme":"Dark","voice":{"tuned":false}}"#).unwrap().offline_offered);
+        let s = Settings { offline_offered: true, ..Default::default() };
+        assert_eq!(from_json(&to_json(&s)), Some(s));
+    }
+
+    #[test]
     fn empty_translation_list_is_kept() {
         let s = from_json(r#"{"translations":[]}"#).unwrap();
         assert!(s.translations.is_empty());
@@ -441,7 +469,8 @@ mod tests {
         let mut s = Settings { translation_font_scale: 7, ..Default::default() };
         save_to_path(&path, &s).unwrap();
         assert_eq!(load_from_path(&path), Some(s.clone()));
-        assert!(!path.with_file_name("settings.json.tmp").exists(), "temp file renamed away");
+        let names = || std::fs::read_dir(path.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>();
+        assert_eq!(names(), ["settings.json"], "temp file renamed away");
 
         // Overwrite existing file.
         s.mushaf_font = MushafFont::MadaniV2;

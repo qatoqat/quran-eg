@@ -168,6 +168,8 @@ impl Colors {
             w.expansion = 0.0;
         }
         ctx.set_visuals(visuals);
+        // Checkboxes and radio buttons a little bigger than egui's, easier to see and hit.
+        ctx.all_styles_mut(|style| (style.spacing.icon_width, style.spacing.icon_width_inner) = (17.0, 9.0));
     }
 }
 

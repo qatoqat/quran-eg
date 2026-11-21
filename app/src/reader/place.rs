@@ -12,6 +12,9 @@ use quran_core::settings::MUSHAF_LINE;
 
 use crate::sheet::Sprite;
 
+/// The least width (em) of an ayah's number drawn as text, in a ring for want of its medallion.
+pub const RINGED_EM: f32 = 0.95;
+
 /// English meaning of the Bismillah when no translation is selected.
 pub const BISMILLAH_MEANING: &str = "In the Name of Allah—the Most Compassionate, Most Merciful";
 
@@ -270,7 +273,7 @@ fn place_cell(input: &mut Input<'_>, item: usize, index: usize, cell: &WordCell,
         Mode::Text { .. } => input.settled || cell.glyph.is_none(),
         Mode::Placeholder => false,
     };
-    let glyph_width = if matches!(mode, Mode::Text { ringed: true }) { glyph_width.max(m.em * 0.95) } else { glyph_width };
+    let glyph_width = if matches!(mode, Mode::Text { ringed: true }) { glyph_width.max(m.em * RINGED_EM) } else { glyph_width };
     let meaning = meaning_job(cell, &m).filter(|_| m.meanings).map(|job| (input.layout)(job).size());
     let width = glyph_width.max(meaning.map_or(0.0, |size| size.x));
     Word { key, x: 0.0, width, y: 0.0, meaning, cell: Some((item, index)), mode }

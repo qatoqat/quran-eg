@@ -15,6 +15,8 @@
 //! - `html`, `highlight`, `verse_text`: API text reduced to safe segments, search
 //!   highlights, and the plain text of a verse.
 //! - `lists`: the surah and juz lists (filtering, lookups).
+//! - `offline`: which answers are whole enough to keep for reading offline, and a
+//!   mushaf page's or a juz's verses put together from the surahs' answers.
 //! - `settings`: the settings model and its JSON persistence.
 
 pub mod api;
@@ -29,6 +31,7 @@ pub mod integrity;
 pub mod lists;
 pub mod mushaf_layout;
 pub mod nav;
+pub mod offline;
 pub mod parse;
 pub mod reference;
 pub mod settings;
