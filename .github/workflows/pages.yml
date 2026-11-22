@@ -27,7 +27,7 @@ jobs:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Libraries of the native build (the tests build it)
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libasound2-dev
       - name: Fonts for the glyph tests
         run: sh crates/qcf-glyphs/tests/fixtures/fetch.sh
       - run: cargo test --workspace --locked
