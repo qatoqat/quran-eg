@@ -60,6 +60,9 @@ pub struct Params {
     /// The plan's clock and the run-on count only while the voice is present, and with plans nothing moves on after a
     /// long silence until the voice is back ("Hold while you are quiet", always with tajweed timing).
     pub voice: bool,
+    /// Tuned movement: the wait before easing back and the glides follow the reader's pace (`Follower::paced`); set by
+    /// hand, they are as set.
+    pub paced: bool,
     /// Opacity it dims to once the voice and news of the reader going on have been gone `quiet_delay` s (1: never), with
     /// or without the hold; the delay is the fade's at an ayah's end: one delay for fading at stops.
     pub quiet_dim: f32,
@@ -106,6 +109,7 @@ impl Params {
             smooth: 0.24,
             // Tajweed timing plays the plan as it was benched: on the voice.
             voice: m.hold_when_quiet || m.follow_tajweed,
+            paced: false,
             quiet_dim: f32::from(m.quiet_dim.min(100)) / 100.0,
             quiet_delay: f32::from(m.ayah_fade_delay_ms) / 1000.0,
             rest: 0.25,
@@ -120,6 +124,7 @@ impl Params {
             let smooth = |ms: u16| ease(VoiceGlide { curve: quran_core::settings::VoiceCurve::Smooth, ms });
             (p.pointer, p.start, p.end) = (smooth(glide), smooth(behind), smooth(glide));
             (p.max_ahead, p.wait) = (f32::from(ahead) / 10.0, f32::from(wait) / 1000.0);
+            p.paced = true;
         }
         p
     }
@@ -191,6 +196,13 @@ const EASE: f32 = 0.04;
 /// Seconds a new seq counts as the voice: its level comes a little after the phones the listener heard. Not in a silence
 /// of over `HUSH` s, where a new seq is the listener hearing the room.
 const SEQ_VOICE: f64 = 0.4;
+/// The pace (words a second) from which the motion's timing follows it, the shortest wait before easing back, the share
+/// of a word's time a glide may take at most, and the shortest glide.
+const PACED_FROM: f32 = 0.5;
+const MIN_WAIT: f32 = 0.3;
+const GLIDE_SHARE: f32 = 0.6;
+const MIN_GLIDE: f32 = 0.15;
+
 /// Seconds of silence that make a stop, and seconds after the voice is back from one in which a step back is followed
 /// at once.
 const STOP: f64 = 0.3;
@@ -370,6 +382,7 @@ impl Follower {
 
     #[allow(clippy::too_many_arguments)]
     pub fn update(&mut self, c: f32, reading: Reading, conf: f32, speed_units: f32, t_audio: f32, now: f64, p: &Params) -> Jump {
+        let p = &self.paced(p);
         if self.planned && !p.plan {
             self.forget_plans(now, p);
         }
@@ -390,6 +403,7 @@ impl Follower {
     /// its plan is no news (its clock does not start, nothing past the drawn place or the evidenced letter, no undim).
     #[allow(clippy::too_many_arguments)]
     pub fn update_plan(&mut self, plan: &Plan, reading: Reading, conf: f32, speed_units: f32, t_audio: f32, now: f64, p: &Params) -> Jump {
+        let p = &self.paced(p);
         self.planned = true;
         self.pending = None;
         if let Some((mut run, at)) = self.stashed.take()
@@ -498,6 +512,22 @@ impl Follower {
         self.recv = now;
         (self.voiced, self.goal_prev, self.settle, self.retract) = (0.0, None, None, false);
         jump
+    }
+
+    /// The motion's timing at the reader's pace: the wait before easing back about a word's time, and a glide no longer
+    /// than most of one, so a fast reader is caught up with and a step back comes soon. With movement set by hand, below
+    /// `PACED_FROM` words a second, or before a pace is known, the settings as they are.
+    fn paced(&self, p: &Params) -> Params {
+        if !p.paced || self.pace < PACED_FROM {
+            return *p;
+        }
+        let word = 1.0 / self.pace;
+        let mut q = *p;
+        q.wait = p.wait.min(word).max(MIN_WAIT.min(p.wait));
+        for e in [&mut q.pointer, &mut q.start, &mut q.end] {
+            e.secs = e.secs.min(GLIDE_SHARE * word).max(MIN_GLIDE.min(e.secs));
+        }
+        q
     }
 
     /// The place last followed (where the pointer is going), if it shows.
@@ -627,6 +657,7 @@ impl Follower {
     /// Seconds until something changes with no news from the listener: the end of the wait for a
     /// reader who is behind, or of the pause before a parked pointer fades out.
     pub fn wake(&self, now: f64, p: &Params) -> Option<f32> {
+        let p = &self.paced(p);
         // In f64 as `faded` and `tick` count: a frame a hair early must still ask for the next one.
         let left = |since: f64, secs: f32| {
             let left = since + f64::from(secs) - now;
@@ -655,6 +686,7 @@ impl Follower {
 
     /// Advances the pointer and the range's edges to clock time `now` (s).
     pub fn tick(&mut self, now: f64, dt: f32, p: &Params) -> Option<Drawn> {
+        let p = &self.paced(p);
         if self.planned && !p.plan {
             self.forget_plans(now, p);
         }
@@ -907,6 +939,30 @@ mod tests {
         f.update(9.4, Reading::Locked, 1.0, 0.0, 5.0, 5.0, &p);
         let held = run(&mut f, 5.0, 0.6, &p).x;
         assert!((held - 10.0).abs() < 0.05, "should wait, at {held}");
+    }
+
+    #[test]
+    fn at_a_fast_pace_a_step_back_waits_about_a_word_and_glides_are_short() {
+        // Words reported every 0.4 s at 12 units a second (the listener's speed: about 2.5 words a second).
+        let p = Params { wait: 1.0, paced: true, ..Default::default() };
+        let mut f = Follower::default();
+        for k in 0..8 {
+            let t = f64::from(k) * 0.4;
+            f.update(10.0 + k as f32, Reading::Locked, 1.0, 12.0, t as f32, t, &p);
+            run(&mut f, t, 0.4, &p);
+        }
+        let q = f.paced(&p);
+        assert!(q.wait < 0.5 && q.wait >= MIN_WAIT, "wait {}", q.wait);
+        assert!(q.pointer.secs <= 0.6 / f.pace + 1e-6, "glide {}", q.pointer.secs);
+        // A step back now is followed after about a word's time, not the second the settings say.
+        let before = run(&mut f, 3.2 - FRAME, FRAME, &p).x;
+        f.update(before - 1.0, Reading::Locked, 1.0, 12.0, 3.2, 3.2, &p);
+        let back = run(&mut f, 3.2, 0.9, &p).x;
+        assert!(back < before - 0.3, "should have eased back from {before}, at {back}");
+        // No pace known, or movement set by hand: the settings as they are.
+        assert_eq!(Follower::default().paced(&p), p);
+        let manual = Params { paced: false, ..p };
+        assert_eq!(f.paced(&manual), manual);
     }
 
     #[test]
