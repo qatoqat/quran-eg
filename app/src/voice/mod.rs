@@ -11,8 +11,9 @@
 //! through the same marker (`dock` draws the rest), so their changes can be seen at work.
 //! `installed` tells there which listener is installed and which models it can run. Tuned movement: `hold` keeps a jump
 //! ahead back until the reading goes on there; `keep` keeps the line being read in view; `skipped` marks the words the
-//! reading went past unread until they are read; `toast` says where the reader is about to be taken, which words they
-//! skipped, and, with `weak`, when the microphone hears them too faintly. `replay` plays the newest
+//! reading went past unread until they are read (those the ayah being read goes on with, when the reading went into a
+//! look-alike of it); `toast` says where the reader is about to be taken, that they went into a similar ayah, which
+//! words they skipped, and, with `weak`, when the microphone hears them too faintly. `replay` plays the newest
 //! recording through `sound` while a listener of its own hears it, so the pointer follows it as it does the reader.
 
 mod dock;
@@ -43,6 +44,7 @@ use quran_core::settings::Voice as Settings;
 use quran_core::view::WordRef;
 
 use self::link::{Event, Heard, Link, Want};
+use self::skipped::Kind;
 use self::marker::{Marker, Stage, Wake, frame_dt};
 use self::meter::Meter;
 use self::toast::{Click, Note, Toast};
@@ -383,24 +385,44 @@ impl Voice {
         // (A replay's is the recording's microphone, which nobody can move closer now.)
         let weak = self.status == Status::Listening && !self.replay && self.weak.tick(now);
         let skipped = self.marker.skipped().summary().filter(|_| settings.skipped.enabled);
-        let note = Note::first(shown.offer, skipped, weak);
+        let slide = self.marker.skipped().slide().filter(|_| settings.similar.enabled);
+        let note = Note::first(shown.offer, slide, skipped, weak);
         let toast = note.as_ref().map(|note| Toast::new(ctx, note, chapters, colors, area.width() - 24.0, 1.0));
         let height = toast.as_ref().map_or(0.0, Toast::height);
         if let (Some(y), Some(toast)) = (self.toast.top(note.as_ref(), area, self.line, height), toast) {
-            let skips = matches!(note, Some(Note::Skipped(_)));
-            match toast.show(ctx, egui::Id::unique("voice-toast"), area, y, colors) {
-                Some(Click::Go) => steer.go_to = steer.go_to.or(self.marker.choose(true)),
-                Some(Click::Stay) => steer.go_to = steer.go_to.or(self.marker.choose(false)),
-                // To a little before the first words skipped, as the pointer's moves go (a fade, a page turned).
-                Some(Click::Back) => steer.go_to = steer.go_to.or(self.marker.skipped().back_to()),
-                Some(Click::Dismiss) if skips => {
-                    self.marker.skipped().clear();
+            let marks = match note {
+                Some(Note::Skipped(_)) => Some(Kind::Skipped),
+                Some(Note::Similar(_)) => Some(Kind::Similar),
+                _ => None,
+            };
+            match (toast.show(ctx, egui::Id::unique("voice-toast"), area, y, colors), marks) {
+                // Into the look-alike after all: no mistake, and the pointer follows the reader there.
+                (Some(Click::Go), Some(Kind::Similar)) => {
+                    let into = slide.map(|s| WordRef { chapter: s.into.0, verse: s.into.1, word: s.into.2 });
+                    steer.go_to = steer.go_to.or(self.marker.choose(true)).or(into);
+                    self.marker.skipped().dismiss(Kind::Similar);
+                }
+                (Some(Click::Go), _) => steer.go_to = steer.go_to.or(self.marker.choose(true)),
+                (Some(Click::Stay), _) => steer.go_to = steer.go_to.or(self.marker.choose(false)),
+                // To a little before the first words skipped (for a slide, the word where the ayah being read goes on, the
+                // look-alike no longer followed), as the pointer's moves go (a fade, a page turned).
+                (Some(Click::Back), kind) => {
+                    if kind == Some(Kind::Similar) {
+                        self.marker.choose(false);
+                    }
+                    steer.go_to = steer.go_to.or(kind.and_then(|kind| self.marker.skipped().back_to(kind)));
+                }
+                (Some(Click::Dismiss), Some(kind)) => {
+                    self.marker.skipped().dismiss(kind);
+                    if kind == Kind::Similar {
+                        self.marker.choose(false);
+                    }
                     ctx.request_repaint();
                 }
-                Some(Click::Dismiss) => self.weak.dismiss(),
-                // The countdown moves on (the skipped words' toast changes only with news).
-                None if !skips => ctx.request_repaint_after_secs(0.25),
-                None => {}
+                (Some(Click::Dismiss), None) => self.weak.dismiss(),
+                // The countdown moves on (the marks' toasts change only with news).
+                (None, None) => ctx.request_repaint_after_secs(0.25),
+                (None, Some(_)) => {}
             }
         }
         if let Some(to) = steer.go_to {

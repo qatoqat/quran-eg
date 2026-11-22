@@ -13,6 +13,12 @@
 //! since the report before when that was a step of reading, and a step back onto a run of marks a word or two in takes
 //! the run's first words too (the listener finds the place a little late): reading them clears them. They are drawn in
 //! the accuracy range's shapes under the pointer, and go when listening stops or the reader dismisses them.
+//! A slide into a look-alike ayah (`slid`) leaves the words the ayah being read goes on with unread too: they are marked
+//! as a kind of their own, three from where the two part (the rest of the ayah when no more than five are left), and
+//! reading them clears them in the same way, a word or two in from wherever the reader comes back. A skip the listener
+//! says slid on (from the ayah it was made in into the one it landed in) was such a slide, near (2:68 into 2:69, on one
+//! page), and is marked as one; one it comes back from sliding (from where it landed to where it was made) was its own:
+//! it went on to a look-alike of where the reader was (56:39 for 56:13, the same ayah), and its marks go.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -43,6 +49,20 @@ const BACK_IN: u32 = 2;
 /// again, and the words short of where the reading had got to before that a move on reaches it.
 const AGAIN: u32 = 3;
 const NEAR: u32 = 2;
+/// The words of the ayah being read a slide marks: so many from where it parts from the look-alike, or the rest of the
+/// ayah when no more than `REST` are left.
+const FEW: u16 = 3;
+const REST: u16 = 5;
+/// Seconds after a skip in which the listener's word on it (a slide on, or back) counts, and words on from where it was
+/// made that a slide back may come to.
+const OWN: (f64, u32) = (15.0, 30);
+
+/// The marks' two kinds: words gone past unread, and the ayah's own words where the reading went into a look-alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Skipped,
+    Similar,
+}
 
 /// A report as the marks go by it: its word (index in the whole Quran, and place), its position (the index plus the
 /// share read) and the clock time it came at.
@@ -64,10 +84,20 @@ pub struct Summary {
     pub others: usize,
 }
 
+/// What the toast says of a slide into a look-alike: the first word marked (where the ayah being read goes on, and Go
+/// back goes) and where in the look-alike the reading went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Slide {
+    pub from: Loc,
+    pub into: Loc,
+}
+
 #[derive(Debug, Default)]
 pub struct Skipped {
-    /// The words marked: place, and index in the whole Quran.
+    /// The words marked: place, and index in the whole Quran; those a slide into a look-alike left, and where it went.
     marks: BTreeMap<Loc, u32>,
+    similar: BTreeMap<Loc, u32>,
+    into: Option<Loc>,
     /// The first report on the furthest word reached, and whether the reading has stayed there since.
     furthest: Option<At>,
     stayed: bool,
@@ -89,11 +119,13 @@ pub struct Skipped {
     quiet: Option<f64>,
     /// The reader moved the view away from the furthest word: the next move past it is theirs, no skip.
     chosen: bool,
+    /// The last skip marked: the word it was made from, and where the reading arrived.
+    landed: Option<(At, At)>,
 }
 
 /// The place `n` words on from `loc` (back, for a negative `n`), across ayahs and surahs, the words counted as the
 /// listener counts them (no ayah ends).
-fn step(loc: Loc, n: i64) -> Option<Loc> {
+pub fn step(loc: Loc, n: i64) -> Option<Loc> {
     let (mut s, mut a) = (loc.0, loc.1);
     let mut w = i64::from(loc.2) + n;
     loop {
@@ -147,6 +179,7 @@ impl Skipped {
         let arrived = first.or(self.arrived.take()).filter(|a| a.i <= at.i).unwrap_or(at);
         self.read(arrived, at, pace, min.unwrap_or(1));
         self.skip(arrived, pace, min);
+        self.slides(h, now);
         self.went(arrived, at, now);
     }
 
@@ -176,13 +209,57 @@ impl Skipped {
         self.chosen = self.furthest.is_some_and(|f| words.binary_search_by(|w| w.0.cmp(&f.loc)).is_err());
     }
 
-    /// Every mark goes (the reader dismissed them, or they are not shown).
+    /// The listener's word on the last skip, at clock time `now`: sliding on from the ayah it was made in into the one it
+    /// landed in, the reading went into a look-alike (the words the first goes on with are marked instead); sliding back
+    /// from where it landed to near where it was made, the listener had gone on to a look-alike of where the reader was,
+    /// who skipped nothing. Either way the skip's marks go.
+    fn slides(&mut self, h: &Heard, now: f64) {
+        let (Some((shared, to)), Some((from, landed))) = (h.slid, self.landed) else { return };
+        let ayah = |l: Loc| (l.0, l.1);
+        let on = ayah(shared) == ayah(from.loc) && ayah(to) == ayah(landed.loc);
+        let back = ayah(shared) == ayah(landed.loc) && h.word + NEAR >= from.i && h.word <= from.i + OWN.1;
+        if now - landed.time > OWN.0 || !(on || back) {
+            return;
+        }
+        self.marks.retain(|_, i| *i <= from.i || *i >= landed.i);
+        self.landed = None;
+        if let Some(parted) = parting(h.slid, landed.loc, (from.loc, from.pos)).filter(|_| on) {
+            self.slid(parted, landed.loc);
+        }
+    }
+
+    /// The reading went into a look-alike at `into`, parting from the ayah being read at `from` (its place and index in
+    /// the whole Quran): the words this ayah goes on with there are marked (those of a slide before go).
+    pub fn slid(&mut self, (from, i): (Loc, u32), into: Loc) {
+        let left = words_in(from.0, from.1).and_then(|n| u16::try_from(n).ok()).and_then(|n| (n + 1).checked_sub(from.2));
+        let Some(rest) = left.filter(|r| *r > 0 && from.2 > 0) else { return };
+        let n = if rest <= REST { rest } else { FEW };
+        self.similar = (0..n).map(|k| ((from.0, from.1, from.2 + k), i + u32::from(k))).collect();
+        self.into = Some(into);
+    }
+
+    /// The slide marked, while any of its words are.
+    pub fn slide(&self) -> Option<Slide> {
+        let (&from, _) = self.similar.first_key_value()?;
+        Some(Slide { from, into: self.into? })
+    }
+
+    /// The marks of a kind go (the reader dismissed them, or they are not shown).
+    pub fn dismiss(&mut self, kind: Kind) {
+        match kind {
+            Kind::Skipped => self.marks.clear(),
+            Kind::Similar => self.similar.clear(),
+        }
+    }
+
+    /// Every mark goes (listening stopped).
     pub fn clear(&mut self) {
         self.marks.clear();
+        self.similar.clear();
     }
 
     pub fn is_empty(&self) -> bool {
-        self.marks.is_empty()
+        self.marks.is_empty() && self.similar.is_empty()
     }
 
     /// The first run of marks, and how many more there are.
@@ -205,23 +282,31 @@ impl Skipped {
     }
 
     /// Where Go back takes the reader: just before the first run of marks (the word read before the mistake) on its page
-    /// and in its surah, else the run's first word.
-    pub fn back_to(&self) -> Option<WordRef> {
-        let (&from, _) = self.marks.first_key_value()?;
-        let before = step(from, -1).filter(|b| b.0 == from.0 && page_of(b.0, b.1) == page_of(from.0, from.1));
+    /// and in its surah, else the run's first word; for a slide, the first word marked (where the ayah goes on).
+    pub fn back_to(&self, kind: Kind) -> Option<WordRef> {
+        let (&from, _) = self.of(kind).first_key_value()?;
+        let before = step(from, -1).filter(|b| kind == Kind::Skipped && b.0 == from.0 && page_of(b.0, b.1) == page_of(from.0, from.1));
         let (chapter, verse, word) = before.unwrap_or(from);
         Some(WordRef { chapter, verse, word })
     }
 
-    /// Rectangles over the marked words among `words` (those on screen, in reading order): one over each run of them on
-    /// a line, `size` tenths of the line's height tall around where the pointer is there (`lift` of the text size over
-    /// the baseline), reaching beyond the words as the range does.
-    pub fn rects(&self, words: &[Slot], lift: f32, size: u8) -> Vec<Rect> {
-        let (Some((&first, _)), Some((&last, _))) = (self.marks.first_key_value(), self.marks.last_key_value()) else {
+    fn of(&self, kind: Kind) -> &BTreeMap<Loc, u32> {
+        match kind {
+            Kind::Skipped => &self.marks,
+            Kind::Similar => &self.similar,
+        }
+    }
+
+    /// Rectangles over the words of a kind marked among `words` (those on screen, in reading order): one over each run of
+    /// them on a line, `size` tenths of the line's height tall around where the pointer is there (`lift` of the text size
+    /// over the baseline), reaching beyond the words as the range does.
+    pub fn rects(&self, kind: Kind, words: &[Slot], lift: f32, size: u8) -> Vec<Rect> {
+        let marks = self.of(kind);
+        let (Some((&first, _)), Some((&last, _))) = (marks.first_key_value(), marks.last_key_value()) else {
             return Vec::new();
         };
         let (lo, hi) = (words.partition_point(|w| w.0 < first), words.partition_point(|w| w.0 <= last));
-        let marked = |k: usize| self.marks.contains_key(&words[k].0);
+        let marked = |k: usize| marks.contains_key(&words[k].0);
         let mut out = Vec::new();
         let mut k = lo;
         while k < hi {
@@ -245,28 +330,19 @@ impl Skipped {
 
     /// The words the reading shows read lose their marks: from where it arrived to the report's word, with the words
     /// since the last report when that was a step of reading (fewer than `min` between, or no more than the reader could
-    /// have read since), and, stepping back a word or two into a run of marks, the run's first words.
+    /// have read since), and, stepping back a word or two into a run of marks (or coming onto a slide's from anywhere:
+    /// back from the look-alike), the run's first words.
     fn read(&mut self, arrived: At, at: At, pace: f32, min: u32) {
-        if self.marks.is_empty() {
+        if self.is_empty() {
             return;
         }
-        let mut from = arrived.i;
-        match self.last {
-            Some(last) if last.i < arrived.i => {
-                if arrived.i - last.i - 1 < min || arrived.i as f32 <= self.reach(arrived.time, pace, arrived.i) {
-                    from = last.i + 1;
-                }
-            }
-            Some(last) if arrived.i < last.i => {
-                if let Some(start) = self.run_start(arrived)
-                    && arrived.i - start <= BACK_IN
-                {
-                    from = start;
-                }
-            }
-            _ => {}
+        let read_on = self.last.filter(|last| last.i < arrived.i && (arrived.i - last.i - 1 < min || arrived.i as f32 <= self.reach(arrived.time, pace, arrived.i)));
+        let back = self.last.is_some_and(|last| arrived.i < last.i);
+        for (marks, from_anywhere) in [(&mut self.marks, false), (&mut self.similar, true)] {
+            let late = run_start(marks, arrived.loc).filter(|start| (back || from_anywhere) && arrived.i.saturating_sub(*start) <= BACK_IN);
+            let from = read_on.map_or(late.unwrap_or(arrived.i), |last| last.i + 1);
+            marks.retain(|_, i| *i < from || *i > at.i);
         }
-        self.marks.retain(|_, i| *i < from || *i > at.i);
     }
 
     /// Marks the words between the furthest reached (where the reading had got to before it went back, for a move on to
@@ -292,6 +368,7 @@ impl Skipped {
         }
         if loc.and_then(|l| step(l, 1)) == Some(arrived.loc) {
             self.marks.extend(words);
+            self.landed = Some((f, arrived));
         }
     }
 
@@ -361,19 +438,41 @@ impl Skipped {
         }
         ((to - from) - silent).max(0.0) as f32
     }
+}
 
-    /// The first word of the run of marks (marked words one after another) `a` is in, if it is marked.
-    fn run_start(&self, a: At) -> Option<u32> {
-        let mut start = *self.marks.get(&a.loc)?;
-        for (_, &i) in self.marks.range(..a.loc).rev() {
-            if i + 1 != start {
-                break;
-            }
-            start = i;
-        }
-        Some(start)
+#[cfg(test)]
+impl Skipped {
+    /// The words marked of a kind.
+    pub fn words(&self, kind: Kind) -> Vec<Loc> {
+        self.of(kind).keys().copied().collect()
     }
 }
 
+/// Where a reading that went on into a look-alike at `into` parts from the ayah of `from` (a place read there, and its
+/// position): after the last word the listener says the two share (`slid`), else at the word the reader had come to
+/// (after it, heard half through it or more). Its place and index in the whole Quran.
+pub fn parting(slid: Option<(Loc, Loc)>, into: Loc, (from, at): (Loc, f32)) -> Option<(Loc, u32)> {
+    let (ayah, i) = (|l: Loc| (l.0, l.1), at as u32);
+    match slid.filter(|(shared, to)| ayah(*shared) == ayah(from) && ayah(*to) == ayah(into)) {
+        Some((shared, _)) => Some((step(shared, 1)?, (i + u32::from(shared.2) + 1).checked_sub(u32::from(from.2))?)),
+        None if at.fract() >= 0.5 => Some((step(from, 1)?, i + 1)),
+        None => Some((from, i)),
+    }
+}
+
+/// The first word of the run of `marks` (marked words one after another) `loc` is in, if it is marked.
+fn run_start(marks: &BTreeMap<Loc, u32>, loc: Loc) -> Option<u32> {
+    let mut start = *marks.get(&loc)?;
+    for (_, &i) in marks.range(..loc).rev() {
+        if i + 1 != start {
+            break;
+        }
+        start = i;
+    }
+    Some(start)
+}
+
+#[cfg(test)]
+mod slides;
 #[cfg(test)]
 mod tests;

@@ -134,6 +134,13 @@ pub fn normalize(s: &mut Settings) {
     skipped.border = skipped.border.min(12);
     skipped.blur = skipped.blur.min(10);
     skipped.min_gap = skipped.min_gap.clamp(1, 10);
+    let similar = &mut voice.similar;
+    similar.color = super::sanitize_color(&similar.color).unwrap_or_else(|| super::DEFAULT_SIMILAR_COLOR.into());
+    similar.size = similar.size.clamp(4, 20);
+    similar.opacity = similar.opacity.min(100);
+    similar.roundness = similar.roundness.min(50);
+    similar.border = similar.border.min(12);
+    similar.blur = similar.blur.min(10);
     let motion = &mut voice.motion;
     for glide in [&mut motion.pointer, &mut motion.range_start, &mut motion.range_end] {
         glide.ms = glide.ms.clamp(60, 1500);
@@ -496,6 +503,21 @@ mod tests {
         let k = &s.voice.skipped;
         assert_eq!((k.color.as_str(), k.size, k.opacity, k.roundness, k.border, k.blur, k.min_gap), ("#d9534f", 4, 100, 50, 12, 10, 1));
         assert_eq!(from_json(r#"{"voice":{"skipped":{"min_gap":99}}}"#).unwrap().voice.skipped.min_gap, 10);
+    }
+
+    #[test]
+    fn a_slide_into_a_similar_ayah_is_marked_by_default_in_its_own_colour_its_look_clamped() {
+        // Settings of before: marked, as the skipped words are, in violet.
+        let s = from_json(r##"{"voice":{"skipped":{"color":"#123abc","opacity":50}}}"##).unwrap();
+        assert_eq!(s.voice.similar, crate::settings::VoiceSimilar::default());
+        assert!(s.voice.similar.enabled && s.voice.similar.color == "#8a63d2" && s.voice.similar.opacity == 30);
+        let mut s = Settings::default();
+        let k = &mut s.voice.similar;
+        (k.enabled, k.color, k.size, k.opacity, k.roundness, k.border, k.blur) = (false, "#00aa55".into(), 12, 45, 50, 2, 4);
+        assert_eq!(from_json(&to_json(&s)), Some(s));
+        let s = from_json(r#"{"voice":{"similar":{"color":"blue","size":30,"opacity":200,"roundness":99,"border":99,"blur":99}}}"#).unwrap();
+        let k = &s.voice.similar;
+        assert_eq!((k.color.as_str(), k.size, k.opacity, k.roundness, k.border, k.blur), ("#8a63d2", 20, 100, 50, 12, 10));
     }
 
     #[test]

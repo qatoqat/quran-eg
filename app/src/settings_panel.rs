@@ -501,7 +501,8 @@ fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings, (listener, joine
             "Heard far from where you were being followed (another surah, or more than a page away), or off the page you \
              turned to yourself, the place counts as lost: the pointer hides and the page stays, in case it was a slip or a \
              mishearing. A toast counts this long down before the reader goes there (Go now, Stay); one that sounds \
-             like the ayah you are reading only warns. Reading on, into the next page or surah, is followed at once.",
+             like the ayah you are reading only warns (gone on into, it is a similar ayah: see below). Reading on, into \
+             the next page or surah, is followed at once.",
         );
     }
     check(ui, &mut voice.tuned, "Tuned movement");
@@ -556,6 +557,25 @@ fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings, (listener, joine
             colors,
             "A move on past words you could not have read in the time is a skip; the listener catching up after lagging a \
              word or two is not. A toast offers to go back to them, or to dismiss the marks.",
+        );
+    }
+    ui.add_space(8.0);
+    small_caps(ui, colors, "Similar ayah");
+    let k = &mut voice.similar;
+    check(ui, &mut k.enabled, "Mark where you went into a similar ayah (reading the words takes the mark away)");
+    if k.enabled {
+        color(ui, &mut k.color, "Colour");
+        range(ui, "Height (tenths of a line's height)", &mut k.size, 4..=20, 1, "");
+        range(ui, "Opacity", &mut k.opacity, 0..=100, 2, "%");
+        range(ui, "Roundness", &mut k.roundness, 0..=50, 5, "%");
+        range(ui, "Outline", &mut k.border, 0..=12, 1, " pt");
+        range(ui, "Edge blur", &mut k.blur, 0..=10, 1, "");
+        help(
+            ui,
+            colors,
+            "Gone on into another ayah that shares its words with the one you are reading (a mutashabih), the next words \
+             of yours are marked where the two part. A toast offers to go back there, to go there after all, or to dismiss \
+             the marks.",
         );
     }
     ui.add_space(8.0);

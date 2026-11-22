@@ -150,6 +150,7 @@ pub struct Voice {
     pub lift: u8,
     pub range: VoiceRange,
     pub skipped: VoiceSkipped,
+    pub similar: VoiceSimilar,
     pub motion: VoiceMotion,
     /// Keep the line being read in view.
     pub auto_scroll: bool,
@@ -184,6 +185,7 @@ impl Default for Voice {
             lift: 2,
             range: VoiceRange::default(),
             skipped: VoiceSkipped::default(),
+            similar: VoiceSimilar::default(),
             motion: VoiceMotion::default(),
             auto_scroll: true,
             tuned: true,
@@ -250,6 +252,35 @@ pub const DEFAULT_SKIPPED_COLOR: &str = "#d9534f";
 impl Default for VoiceSkipped {
     fn default() -> Self {
         Self { enabled: true, color: DEFAULT_SKIPPED_COLOR.into(), size: 8, opacity: 30, roundness: 35, border: 0, blur: 0, min_gap: 2 }
+    }
+}
+
+/// A slide into a similar ayah (one that shares its words with the ayah being read, read on there): the words the ayah
+/// being read goes on with where the two part, marked until they are read, as the skipped words are (in a colour of
+/// their own).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceSimilar {
+    pub enabled: bool,
+    /// `#rrggbb`.
+    pub color: String,
+    /// Height in tenths of a line's height, 4..=20.
+    pub size: u8,
+    /// Percent, 0..=100.
+    pub opacity: u8,
+    /// Corner radius in percent of its height, 0..=50 (50 = pill).
+    pub roundness: u8,
+    /// Outline width in points, 0..=12.
+    pub border: u8,
+    /// Softness of its edge, 0..=10.
+    pub blur: u8,
+}
+
+pub const DEFAULT_SIMILAR_COLOR: &str = "#8a63d2";
+
+impl Default for VoiceSimilar {
+    fn default() -> Self {
+        Self { enabled: true, color: DEFAULT_SIMILAR_COLOR.into(), size: 8, opacity: 30, roundness: 35, border: 0, blur: 0 }
     }
 }
 

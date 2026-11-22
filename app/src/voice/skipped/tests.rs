@@ -9,7 +9,7 @@ use super::*;
 const PACE: f32 = 1.0 / 0.64;
 
 /// The index in the whole Quran of the word at `loc`, as the listener counts (none for a formula or a basmala place).
-fn index(loc: Loc) -> u32 {
+pub(super) fn index(loc: Loc) -> u32 {
     if loc.0 == 0 || loc.1 == 0 {
         return 0;
     }
@@ -19,7 +19,7 @@ fn index(loc: Loc) -> u32 {
     (before + here + usize::from(loc.2) - 1) as u32
 }
 
-fn report(loc: Loc, letter: u16, state: &str) -> Heard {
+pub(super) fn report(loc: Loc, letter: u16, state: &str) -> Heard {
     Heard { loc, word: index(loc), letter, letters: 4, state: state.into(), conf: 0.97, speed: 8.2, t: 0.0, slid: None, alts: Vec::new(), plan: None }
 }
 
@@ -93,7 +93,7 @@ fn an_ayah_skipped_after_a_pause_is_marked_whole() {
     assert_eq!(r.marked(), span((68, 45, 1), (68, 45, 5)));
     assert_eq!(r.s.summary(), Some(Summary { from: (68, 45, 1), to: (68, 45, 5), words: 5, others: 0 }));
     // Go back: to the word read before it, on the same page.
-    assert_eq!(r.s.back_to(), Some(WordRef { chapter: 68, verse: 44, word: 10 }));
+    assert_eq!(r.s.back_to(Kind::Skipped), Some(WordRef { chapter: 68, verse: 44, word: 10 }));
 }
 
 #[test]
@@ -206,11 +206,11 @@ fn the_marks_are_drawn_over_each_run_of_them_on_a_line() {
     s.marks.extend(span((68, 45, 1), (68, 45, 3)).into_iter().map(|l| (l, index(l))));
     // 68:45:1 at the first line's end; 68:45:2-3 at the second line's start. Height 0.8 of the line around the pointer's
     // height (0.2 of the text size over the baseline), 0.12 of the line beyond the words.
-    let rects = s.rects(&words, 0.2, 8);
+    let rects = s.rects(Kind::Skipped, &words, 0.2, 8);
     let want = [Rect::from_min_max(pos2(75.2, 8.0), pos2(134.8, 40.0)), Rect::from_min_max(pos2(135.2, 48.0), pos2(254.8, 80.0))];
     let close = |a: &Rect, b: &Rect| (a.min - b.min).length() < 1e-3 && (a.max - b.max).length() < 1e-3;
     assert!(rects.len() == 2 && rects.iter().zip(&want).all(|(a, b)| close(a, b)), "{rects:?}");
-    assert!(Skipped::default().rects(&words, 0.2, 8).is_empty());
+    assert!(Skipped::default().rects(Kind::Skipped, &words, 0.2, 8).is_empty());
 }
 
 /// The marker, tuned (a jump ahead is held), hearing `reports` (place, letter, state, clock time).
@@ -354,6 +354,34 @@ fn an_ayah_skipped_reading_again_is_marked_from_the_users_log() {
             assert!(k + 1 == lines.len() || m.skipped().is_empty(), "plans {plans}, after {line}: {:?}", m.skipped().summary());
         }
         assert_eq!(m.skipped().summary(), Some(Summary { from: (2, 41, 2), to: (2, 42, 2), words: 19, others: 0 }), "plans {plans}");
-        assert_eq!(m.skipped().back_to(), Some(WordRef { chapter: 2, verse: 41, word: 1 }));
+        assert_eq!(m.skipped().back_to(Kind::Skipped), Some(WordRef { chapter: 2, verse: 41, word: 1 }));
+    }
+}
+
+#[test]
+fn a_skip_the_listener_comes_back_from_sliding_was_its_own() {
+    // 56:13 and 56:39 are one ayah. Reading 56:11-14, the reader says 56:13-14 again; the listener hears 56:39 (held,
+    // then followed: 56:14:2 to 56:38:2 marked), then 56:14 again, sliding from 56:39 (as the user's log of 20 Nov has
+    // it): the skip was its own. Not sliding, the words read lose their marks and the rest stay.
+    for slides in [true, false] {
+        let mut t = 0.0;
+        let mut news = reads((56, 11, 1), 9, &mut t);
+        news.extend(reads((56, 39, 1), 3, &mut t));
+        let marked = marker(&news).skipped().summary();
+        assert_eq!(marked, Some(Summary { from: (56, 14, 2), to: (56, 38, 2), words: 79, others: 0 }));
+        let back = news.len();
+        news.extend(reads((56, 14, 1), 3, &mut t));
+        let mut m = Marker::default();
+        let params = Params::of(&Settings::default());
+        for (k, &(loc, letter, state, at)) in news.iter().enumerate() {
+            let slid = (slides && k >= back + 2).then_some(((56, 39, 3), (56, 14, 1)));
+            m.heard(Heard { t: at as f32, speed: 8.25, slid, ..report(loc, letter, state) }, at, &params);
+        }
+        let left = m.skipped().summary();
+        if slides {
+            assert!(left.is_none(), "{left:?}");
+        } else {
+            assert_eq!(left, Some(Summary { from: (56, 15, 1), to: (56, 38, 2), words: 77, others: 0 }));
+        }
     }
 }

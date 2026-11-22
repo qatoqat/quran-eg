@@ -4,7 +4,9 @@
 //! away) is taken first for a slip or the listener's mistake: the pointer hides and the page stays, and
 //! the reader goes there only once the recitation has kept being followed there, reading on, for the
 //! set time, counted down in a toast that lets them go at once or stay. A far place that sounds like
-//! the ayah being read (a look-alike) waits for their word. After the reader moved the view themselves
+//! the ayah being read (a look-alike) waits for their word; one the reading slid into from the ayah it
+//! was followed at is taken for that slide once heard there as long as an offer waits, and is told of
+//! by the marks it leaves (`skipped`), not offered. After the reader moved the view themselves
 //! (turned a page, opened another surah), every place off screen is far, until the recitation is
 //! followed on their view: the pointer never undoes their move without a countdown. Places are compared
 //! by their index in the whole Quran, so surah borders need no special case.
@@ -28,6 +30,11 @@ const STALE: f64 = 3.0;
 /// The least countdown after the reader moved the view themselves, so it can be stopped even without a far wait.
 pub const CHOSEN_WAIT: f64 = 3.0;
 
+/// Whether a place (`word`, its index in the whole Quran) is near another (`of`): no further than about a page from it.
+pub fn near(word: u32, of: u32) -> bool {
+    word + BACK >= of && word <= of + AHEAD
+}
+
 /// Where the recitation was being followed on screen.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Home {
@@ -48,10 +55,23 @@ pub struct Stray {
     first: u32,
     word: u32,
     heard: f64,
-    /// It sounds like the ayah being read: never taken there without the reader's word.
-    pub alike: bool,
-    /// The reader chose to stay.
+    /// How it sounds beside the ayah being read: a look-alike is never taken there without the reader's word.
+    pub alike: Like,
+    /// The reader chose to stay; it was taken for a slide.
     declined: bool,
+    slid: bool,
+}
+
+/// How a far place heard sounds beside the ayah being read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Like {
+    /// Nothing alike: followed once read on there for the far wait.
+    Not,
+    /// A look-alike: offered, never followed by itself.
+    Sounds,
+    /// A look-alike the reading may have slid into from the ayah it was followed at: a slide once heard there as long
+    /// as an offer waits (never offered, never followed by itself).
+    Slide,
 }
 
 /// Where the reader may be taken, shown as a toast: the far place, and the seconds left (`None`: a look-alike, which
@@ -116,15 +136,16 @@ impl Pages {
     }
 
     /// The place heard is not on screen. `wait`: seconds a far place must keep being followed before
-    /// the reader goes there; `alike`: it sounds like the ayah being read (taken where a run starts).
-    pub fn off_screen(&mut self, word: u32, loc: Loc, sure: bool, now: f64, wait: f64, alike: bool) -> Verdict {
+    /// the reader goes there; `alike`: how it sounds beside the ayah being read (taken where a run starts; off a view
+    /// the reader chose, no slide).
+    pub fn off_screen(&mut self, word: u32, loc: Loc, sure: bool, now: f64, wait: f64, alike: Like) -> Verdict {
         self.streak = None;
         let away = now - *self.away_since.get_or_insert(now);
         if !sure {
             return if self.stray.is_some() { Verdict::Stray } else { Verdict::Wait };
         }
         let wait = self.wait(wait);
-        let far = self.home.filter(|home| wait > 0.0 && (word + BACK < home.word || word > home.word + AHEAD));
+        let far = self.home.filter(|home| wait > 0.0 && !near(word, home.word));
         let Some(from) = self.chosen.or(far.map(|home| home.loc)) else {
             self.stray = None;
             return self.go_if(away >= AWAY);
@@ -132,13 +153,16 @@ impl Pages {
         let s = match self.stray {
             Some(s) if word + RUN.0 >= s.word && word <= s.word + RUN.1 && now - s.heard <= STALE => s,
             // Somewhere else: a new run, and the clock starts again.
-            _ => Stray { from, to: loc, since: now, first: word, word, heard: now, alike, declined: false },
+            _ => {
+                let alike = if alike == Like::Slide && self.chosen.is_some() { Like::Sounds } else { alike };
+                Stray { from, to: loc, since: now, first: word, word, heard: now, alike, declined: false, slid: false }
+            }
         };
         // (Whether it sounds like the ayah being read is told where the listener went: further on, the run's words
         // come to any word.)
         let s = Stray { to: loc, word, heard: now, ..s };
         self.stray = Some(s);
-        if !s.alike && !s.declined && now - s.since >= wait.max(AWAY) && word >= s.first + ADVANCE {
+        if s.alike == Like::Not && !s.declined && now - s.since >= wait.max(AWAY) && word >= s.first + ADVANCE {
             // The reader really went on there.
             return self.go();
         }
@@ -158,11 +182,23 @@ impl Pages {
         }
     }
 
-    /// The far place to offer the reader, once it has been heard for a second and lately.
+    /// The far place to offer the reader, once it has been heard for a second and lately (a slide's never).
     pub fn offer(&self, now: f64, wait: f64) -> Option<Offer> {
-        let s = self.stray.filter(|s| !s.declined && now - s.since >= AWAY && now - s.heard <= STALE)?;
+        let s = self.stray.filter(|s| s.alike != Like::Slide && self.due(s, now))?;
         let left = (s.since + self.wait(wait).max(AWAY) - now).max(0.0) as f32;
-        Some(Offer { to: s.to, left: (!s.alike).then_some(left) })
+        Some(Offer { to: s.to, left: (s.alike == Like::Not).then_some(left) })
+    }
+
+    /// The look-alike the reading slid into, once heard there as long as an offer waits (once).
+    pub fn slid(&mut self, now: f64) -> Option<Stray> {
+        let s = self.stray.filter(|s| s.alike == Like::Slide && !s.slid && self.due(s, now))?;
+        self.stray = Some(Stray { slid: true, ..s });
+        Some(s)
+    }
+
+    /// Whether a far place heard is to be offered: heard for a second, lately, and the reader has not chosen to stay.
+    fn due(&self, s: &Stray, now: f64) -> bool {
+        !s.declined && now - s.since >= AWAY && now - s.heard <= STALE
     }
 
     /// The wait for a far place: at least a countdown that can be stopped once the reader chose the view.
@@ -212,7 +248,7 @@ mod tests {
         let mut k = 0;
         while f64::from(k) * 0.32 <= secs {
             let now = t + f64::from(k) * 0.32;
-            out.push((now, pages.off_screen(word + k * step, (30, 12, 1), sure, now, 5.0, false)));
+            out.push((now, pages.off_screen(word + k * step, (30, 12, 1), sure, now, 5.0, Like::Not)));
             k += 1;
         }
         out
@@ -221,15 +257,15 @@ mod tests {
     #[test]
     fn with_nothing_followed_yet_any_place_goes_after_a_second() {
         let mut pages = Pages::default();
-        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 0.0, 5.0, false), Verdict::Wait);
+        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 0.0, 5.0, Like::Not), Verdict::Wait);
         assert_eq!(pages.wake(0.4), Some(0.6));
-        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 1.01, 5.0, false), Verdict::Go);
+        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 1.01, 5.0, Like::Not), Verdict::Go);
         // Less than 2 s followed on screen is not yet a home.
         let mut pages = Pages::default();
         pages.on_screen(HOME.0, HOME.1, true, 0.0);
         pages.on_screen(HOME.0, HOME.1, true, 1.5);
-        pages.off_screen(50_000, (60, 1, 1), true, 1.8, 5.0, false);
-        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 2.9, 5.0, false), Verdict::Go);
+        pages.off_screen(50_000, (60, 1, 1), true, 1.8, 5.0, Like::Not);
+        assert_eq!(pages.off_screen(50_000, (60, 1, 1), true, 2.9, 5.0, Like::Not), Verdict::Go);
     }
 
     #[test]
@@ -255,20 +291,20 @@ mod tests {
         assert!(heard(&mut pages, 40_000, 0, true, t, 8.0).iter().all(|(_, v)| *v == Verdict::Stray));
         // Unsure (paused, drifting, low confidence): lost, never taken there.
         let (mut pages, t) = followed(0.0);
-        pages.off_screen(40_000, (30, 12, 1), true, t, 5.0, false);
+        pages.off_screen(40_000, (30, 12, 1), true, t, 5.0, Like::Not);
         assert!(heard(&mut pages, 40_001, 1, false, t + 0.32, 8.0).iter().all(|(_, v)| *v == Verdict::Stray));
         // Hopping from one far place to another: the clock starts again each time.
         let (mut pages, t) = followed(0.0);
         for k in 0..30 {
             let now = t + f64::from(k) * 0.32;
             let word = if k % 2 == 0 { 40_000 + k } else { 60_000 + k };
-            assert_eq!(pages.off_screen(word, (30, 12, 1), true, now, 5.0, false), Verdict::Stray, "{k}");
+            assert_eq!(pages.off_screen(word, (30, 12, 1), true, now, 5.0, Like::Not), Verdict::Stray, "{k}");
         }
         // A run not heard for over 3 s is over: the next place there starts a new one.
         let (mut pages, t) = followed(0.0);
         heard(&mut pages, 40_000, 1, true, t, 3.0);
         let late = t + 3.0 + STALE + 0.5;
-        assert_eq!(pages.off_screen(40_012, (30, 12, 1), true, late, 5.0, false), Verdict::Stray);
+        assert_eq!(pages.off_screen(40_012, (30, 12, 1), true, late, 5.0, Like::Not), Verdict::Stray);
         assert_eq!(pages.stray().unwrap().since, late);
     }
 
@@ -288,20 +324,20 @@ mod tests {
     fn reading_on_or_stepping_back_near_is_followed_after_a_second() {
         for (word, why) in [(HOME.0 + 40, "the next page"), (HOME.0 + 1, "the next surah"), (HOME.0 - 30, "a few lines back")] {
             let (mut pages, t) = followed(0.0);
-            assert_eq!(pages.off_screen(word, (21, 1, 1), true, t, 5.0, false), Verdict::Wait, "{why}");
-            assert_eq!(pages.off_screen(word, (21, 1, 1), true, t + 1.1, 5.0, false), Verdict::Go, "{why}");
+            assert_eq!(pages.off_screen(word, (21, 1, 1), true, t, 5.0, Like::Not), Verdict::Wait, "{why}");
+            assert_eq!(pages.off_screen(word, (21, 1, 1), true, t + 1.1, 5.0, Like::Not), Verdict::Go, "{why}");
         }
         // Without a wait every place is as near.
         let (mut pages, t) = followed(0.0);
-        pages.off_screen(60_000, (60, 1, 1), true, t, 0.0, false);
-        assert_eq!(pages.off_screen(60_000, (60, 1, 1), true, t + 1.1, 0.0, false), Verdict::Go);
+        pages.off_screen(60_000, (60, 1, 1), true, t, 0.0, Like::Not);
+        assert_eq!(pages.off_screen(60_000, (60, 1, 1), true, t + 1.1, 0.0, Like::Not), Verdict::Go);
         // al-Ikhlas (112:1:1, word 77371) from the end of an-Nas (114:6:3, word 77428).
         let mut pages = Pages::default();
         for k in 0..8 {
             pages.on_screen(77_428, (114, 6, 3), true, f64::from(k) * 0.32);
         }
-        pages.off_screen(77_371, (112, 1, 1), true, 3.0, 5.0, false);
-        assert_eq!(pages.off_screen(77_371, (112, 1, 1), true, 4.1, 5.0, false), Verdict::Go);
+        pages.off_screen(77_371, (112, 1, 1), true, 3.0, 5.0, Like::Not);
+        assert_eq!(pages.off_screen(77_371, (112, 1, 1), true, 4.1, 5.0, Like::Not), Verdict::Go);
     }
 
     #[test]
@@ -314,20 +350,20 @@ mod tests {
         assert!(verdicts.iter().all(|(_, v)| *v == Verdict::Stray), "{verdicts:?}");
         let offer = pages.offer(t + 2.0, 0.0).unwrap();
         assert_eq!((offer.to, offer.left.map(|l| (l * 10.0).round())), ((30, 12, 1), Some(10.0)));
-        assert_eq!(pages.off_screen(HOME.0 + 12, (30, 12, 1), true, t + 3.0, 0.0, false), Verdict::Go, "the countdown over");
+        assert_eq!(pages.off_screen(HOME.0 + 12, (30, 12, 1), true, t + 3.0, 0.0, Like::Not), Verdict::Go, "the countdown over");
         // Followed on the reader's view: back to normal.
         let (mut pages, t) = followed(0.0);
         pages.chosen((20, 60, 1));
         pages.on_screen(HOME.0 + 300, (20, 60, 2), true, t);
-        pages.off_screen(HOME.0 + 301, (20, 60, 3), true, t + 0.3, 5.0, false);
-        assert_eq!(pages.off_screen(HOME.0 + 301, (20, 60, 3), true, t + 1.4, 5.0, false), Verdict::Go);
+        pages.off_screen(HOME.0 + 301, (20, 60, 3), true, t + 0.3, 5.0, Like::Not);
+        assert_eq!(pages.off_screen(HOME.0 + 301, (20, 60, 3), true, t + 1.4, 5.0, Like::Not), Verdict::Go);
     }
 
     #[test]
     fn a_look_alike_or_a_declined_place_is_never_followed_by_itself() {
         for decline in [false, true] {
             let (mut pages, t) = followed(0.0);
-            pages.off_screen(40_000, (30, 12, 1), true, t, 5.0, !decline);
+            pages.off_screen(40_000, (30, 12, 1), true, t, 5.0, if decline { Like::Not } else { Like::Sounds });
             if decline {
                 pages.decline();
             }
@@ -338,8 +374,32 @@ mod tests {
         }
         // Chosen at the toast: gone there at once.
         let (mut pages, t) = followed(0.0);
-        pages.off_screen(40_000, (30, 12, 1), true, t, 5.0, true);
+        pages.off_screen(40_000, (30, 12, 1), true, t, 5.0, Like::Sounds);
         assert_eq!(pages.go(), Verdict::Go);
         assert!(pages.stray().is_none() && pages.offer(t + 2.0, 5.0).is_none());
+    }
+
+    #[test]
+    fn a_slide_is_taken_once_when_an_offer_would_be_due_and_never_offered() {
+        let (mut pages, t) = followed(0.0);
+        pages.off_screen(40_000, (30, 12, 5), true, t, 5.0, Like::Slide);
+        assert!(pages.slid(t + 0.9).is_none(), "heard there under a second");
+        pages.off_screen(40_001, (30, 12, 6), true, t + 0.96, 5.0, Like::Not);
+        let s = pages.slid(t + 1.0).unwrap();
+        assert_eq!((s.to, s.alike), ((30, 12, 6), Like::Slide));
+        assert!(pages.slid(t + 1.3).is_none() && pages.offer(t + 1.3, 5.0).is_none(), "once, and never offered");
+        // Read on there: never followed by itself.
+        assert!(heard(&mut pages, 40_002, 1, true, t + 1.28, 8.0).iter().all(|(_, v)| *v == Verdict::Stray));
+        // The reader chose to stay: none.
+        let (mut pages, t) = followed(0.0);
+        pages.off_screen(40_000, (30, 12, 5), true, t, 5.0, Like::Slide);
+        pages.decline();
+        assert!(pages.slid(t + 1.5).is_none());
+        // Off a view the reader chose: a look-alike offered.
+        let (mut pages, t) = followed(0.0);
+        pages.chosen((20, 60, 1));
+        pages.off_screen(40_000, (30, 12, 5), true, t, 5.0, Like::Slide);
+        assert!(pages.slid(t + 1.5).is_none());
+        assert_eq!(pages.offer(t + 1.5, 5.0), Some(Offer { to: (30, 12, 5), left: None }));
     }
 }

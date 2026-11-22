@@ -3,6 +3,8 @@
 //! live pointer (`Voice`, from quran-voice's listener) and the settings' preview (a scripted listener over a few
 //! lines of its own) are both this, so what the preview shows is what the page does.
 
+use std::collections::VecDeque;
+
 use egui::epaint::RectShape;
 use egui::{Color32, CornerRadius, LayerId, Pos2, Rect, Stroke, StrokeKind, Vec2, pos2, vec2};
 use quran_core::settings::Voice as Settings;
@@ -10,14 +12,14 @@ use quran_core::settings::palette::parse_hex;
 use quran_core::view::WordRef;
 
 use super::Steer;
-use super::follow::{Offer, Pages, Stray, Verdict};
+use super::follow::{Like, Offer, Pages, Stray, Verdict, near};
 use super::hold::Hold;
 use super::keep::{Keep, edges, line_of};
 use super::lead::{self, Lead};
 use super::link::{Heard, Loc};
 use super::presence::Heard as Heard2;
 use super::motion::{Drawn, Follower, Jump, Params, Plan, Reading};
-use super::skipped::Skipped;
+use super::skipped::{Kind, Skipped, parting};
 use crate::pointer::{Lens, ReadingPointer};
 use crate::reader::Slot;
 use crate::theme::Colors;
@@ -77,6 +79,10 @@ pub struct Shown {
 /// the room as the next word, or drifted on), and the listener's usual delay for a report without its evidence's age.
 const SILENT: f32 = 0.6;
 const LATENCY: f32 = 0.15;
+/// Words a move on screen must go to be a jump (more than a correction), and seconds a place the reading jumped away
+/// from stays one it left lately.
+const LEAP: f32 = 20.0;
+const LATELY: f64 = 30.0;
 
 #[derive(Default)]
 pub struct Marker {
@@ -99,8 +105,12 @@ pub struct Marker {
     keep: Keep,
     /// A jump ahead waiting for the reading to go on there (tuned).
     hold: Hold,
-    /// The place last drawn on screen: what a far place may sound like.
-    seen: Option<Loc>,
+    /// The place last drawn on screen (and its position: the index in the whole Quran plus the share read): what a far
+    /// place may sound like. The places the reading jumped away from on screen lately, and when: a far look-alike near
+    /// one of them is the listener coming back to the reader (it went on to a look-alike of where they were, and was
+    /// followed there), not the reader sliding.
+    seen: Option<(Loc, f32)>,
+    jumped: VecDeque<(f32, f64)>,
     /// A basmala heard as the next surah's opening, and that surah, until the reader is taken there (once).
     lead: Lead,
     lead_to: Option<u16>,
@@ -167,6 +177,12 @@ impl<'a> From<&'a quran_core::settings::VoiceRange> for Boxes<'a> {
 
 impl<'a> From<&'a quran_core::settings::VoiceSkipped> for Boxes<'a> {
     fn from(s: &'a quran_core::settings::VoiceSkipped) -> Self {
+        Boxes { color: &s.color, opacity: s.opacity, roundness: s.roundness, border: s.border, blur: s.blur }
+    }
+}
+
+impl<'a> From<&'a quran_core::settings::VoiceSimilar> for Boxes<'a> {
+    fn from(s: &'a quran_core::settings::VoiceSimilar) -> Self {
         Boxes { color: &s.color, opacity: s.opacity, roundness: s.roundness, border: s.border, blur: s.blur }
     }
 }
@@ -260,17 +276,25 @@ fn range_rects(
     rects
 }
 
-/// Whether a far place heard (`h`) sounds like the ayah last followed on screen (`seen`): the listener slid there from
-/// it or weighed one against the other, or it went on there at the very word the reader had come to (look-alike ayahs
-/// share their words up to where they part, as 62:7 and 2:95 do); or it is al-Fatihah after a basmala that opened
-/// another surah (the listener chaining the basmala as al-Fatihah's first ayah). The reader is not taken there by itself.
-fn alike(h: &Heard, seen: Option<Loc>) -> bool {
-    let Some((s, a, w)) = seen else { return false };
+/// How a far place heard (`h`) sounds beside the ayah last followed on screen (`seen`). Alike when the listener slid
+/// there from it or weighed one against the other, or went on there at the very word the reader had come to (look-alike
+/// ayahs share their words up to where they part, as 62:7 and 2:95 do), or when it is al-Fatihah after a basmala that
+/// opened another surah (the listener chaining the basmala as al-Fatihah's first ayah); the reader is not taken there by
+/// itself. Another ayah alike, from an ayah, and not near a place the reading jumped away from (`jumped`): where the
+/// reader may have slid into from it (`slides`: when such slides are marked).
+fn alike(h: &Heard, seen: Option<Loc>, jumped: &VecDeque<(f32, f64)>, slides: bool) -> Like {
+    let Some((s, a, w)) = seen else { return Like::Not };
     let ayah = |l: &Loc| (l.0, l.1);
-    h.slid.is_some_and(|(_, to)| ayah(&to) == ayah(&h.loc))
+    let sounds = h.slid.is_some_and(|(_, to)| ayah(&to) == ayah(&h.loc))
         || h.alts.iter().any(|l| ayah(l) == (s, a))
         || (h.loc.2 >= 3 && (w..=w + 2).contains(&h.loc.2))
-        || (a == 0 && h.loc.0 == 1)
+        || (a == 0 && h.loc.0 == 1);
+    let other = s > 0 && a > 0 && h.loc.1 > 0 && ayah(&h.loc) != (s, a) && !jumped.iter().any(|j| near(h.word, j.0 as u32));
+    match (sounds, slides && other) {
+        (false, _) => Like::Not,
+        (true, false) => Like::Sounds,
+        (true, true) => Like::Slide,
+    }
 }
 
 /// egui's steady measure of a frame, which takes the first frame after the app slept (nothing moving, no news) for
@@ -311,7 +335,7 @@ impl Marker {
 
     /// The ayah last followed on screen.
     pub fn seen(&self) -> Option<Loc> {
-        self.seen
+        self.seen.map(|s| s.0)
     }
 
     /// The reader moved the view themselves, now showing `words`: places off screen are far from it until the
@@ -321,7 +345,7 @@ impl Marker {
         if let Some(first) = words.iter().find(ayah) {
             self.pages.chosen(first.0);
         }
-        let on = self.seen.and_then(|loc| words.binary_search_by(|(l, ..)| l.cmp(&loc)).ok());
+        let on = self.seen.and_then(|(loc, _)| words.binary_search_by(|(l, ..)| l.cmp(&loc)).ok());
         self.keep.reader_moved(words, on);
         self.skipped.moved(words);
     }
@@ -504,15 +528,20 @@ impl Marker {
         // (At rest, unless something drawn is found on its way below.)
         (self.ticked, self.news, self.due) = (Some((now, false)), false, None);
         self.lead.view(words, area, ctx.input(|i| i.pointer.hover_pos()));
-        // The words gone past unread, under the range (painted first on its layer) wherever the pointer is; they change
-        // only with news, and ask for no frames.
+        // The words gone past unread (and those a slide into a look-alike left), under the range (painted first on its
+        // layer) wherever the pointer is; they change only with news, and ask for no frames.
         let lift = f32::from(settings.lift) / 10.0;
-        if !settings.skipped.enabled {
-            self.skipped.clear();
-        } else if !self.skipped.is_empty() {
-            let rects = self.skipped.rects(words, lift, settings.skipped.size);
+        for (kind, on) in [(Kind::Skipped, settings.skipped.enabled), (Kind::Similar, settings.similar.enabled)] {
+            if !on {
+                self.skipped.dismiss(kind);
+            }
+        }
+        if !self.skipped.is_empty() {
             let painter = ctx.layer_painter(stage.layers.0).with_clip_rect(area);
-            paint_boxes(&painter, &rects, Boxes::from(&settings.skipped), 1.0 - self.out, stage.scale);
+            let (skipped, similar) = (&settings.skipped, &settings.similar);
+            for (kind, size, look) in [(Kind::Skipped, skipped.size, Boxes::from(skipped)), (Kind::Similar, similar.size, Boxes::from(similar))] {
+                paint_boxes(&painter, &self.skipped.rects(kind, words, lift, size), look, 1.0 - self.out, stage.scale);
+            }
         }
         let params = Params::of(settings);
         let far_wait = f64::from(settings.far_wait_ms) / 1000.0;
@@ -541,10 +570,17 @@ impl Marker {
             // shows again.
             if anchor.loc.1 == 0 {
                 shown.steer.lead = self.lead_to.take().filter(|_| settings.auto_scroll);
-            } else if self.pages.off_screen(anchor.word, anchor.loc, sure, now, far_wait, alike(&anchor, self.seen)) == Verdict::Go
-                && settings.auto_scroll
-            {
-                shown.steer.go_to = Some(WordRef { chapter: anchor.loc.0, verse: anchor.loc.1, word: anchor.loc.2 });
+            } else {
+                let like = alike(&anchor, self.seen.map(|s| s.0), &self.jumped, settings.similar.enabled);
+                if self.pages.off_screen(anchor.word, anchor.loc, sure, now, far_wait, like) == Verdict::Go && settings.auto_scroll {
+                    shown.steer.go_to = Some(WordRef { chapter: anchor.loc.0, verse: anchor.loc.1, word: anchor.loc.2 });
+                }
+                // Gone on into a look-alike of the ayah being read: the words that ayah goes on with are marked.
+                if let (Some(slide), Some(seen)) = (self.pages.slid(now), self.seen)
+                    && let Some(from) = parting(anchor.slid, anchor.loc, seen)
+                {
+                    self.skipped.slid(from, slide.to);
+                }
             }
             shown.offer = self.pages.offer(now, far_wait).filter(|_| settings.auto_scroll && shown.steer.go_to.is_none());
             if let Some(after) = self.pages.wake(now) {
@@ -574,7 +610,12 @@ impl Marker {
             // The surah a basmala leads into is on screen already.
             self.lead_to = None;
         }
-        self.seen = Some(anchor.loc);
+        let here = position(&anchor);
+        self.jumped.retain(|j| now - j.1 <= LATELY);
+        if let Some((_, was)) = self.seen.filter(|(_, was)| (here - was).abs() > LEAP) {
+            self.jumped.push_back((was, now));
+        }
+        self.seen = Some((anchor.loc, here));
         // Back from a far place: a slip, or the listener's mistake (where a mistake notifier would say so).
         shown.slip = self.pages.on_screen(anchor.word, anchor.loc, sure, now);
         let (h, em) = (words[i].1.height(), words[i].3);

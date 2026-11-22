@@ -1,7 +1,8 @@
 //! The voice pointer's toast, in the header's look (its colours, border and type): where it is about to take the
 //! reader (a far place, counted down, with Go now and Stay), a warning for a place that sounds like the ayah being read
-//! (it waits for Go there or Stay), the words the reading went past unread (Go back to them, or Dismiss the marks), or a
-//! note that the microphone hears the voice only faintly (Dismiss). One line with
+//! (it waits for Go there or Stay), the reading gone into a similar ayah (Go back to where the ayah being read goes on,
+//! Go there after all, or Dismiss the marks), the words the reading went past unread (Go back to them, or Dismiss the
+//! marks), or a note that the microphone hears the voice only faintly (Dismiss). One line with
 //! its buttons at the end, in a capsule like the header's Surah | Juz | Page: the one that stands for doing nothing is
 //! filled. It sits a little below the line being read, where the eyes are (three quarters of the way down while that
 //! line is not known), and stays put: it never slides with the page, and moves only when the line being read comes
@@ -16,7 +17,7 @@ use quran_core::reference::words_in;
 
 use super::follow::Offer;
 use super::link::Loc;
-use super::skipped::Summary;
+use super::skipped::{Slide, Summary};
 use crate::kit::Capsule;
 use crate::theme::Colors;
 
@@ -27,6 +28,8 @@ pub enum Note {
     Moving(Loc, f32),
     /// A far place that sounds like the ayah being read.
     Alike(Loc),
+    /// The reading went on into a look-alike of the ayah being read.
+    Similar(Slide),
     /// Words the reading went past unread (the first run of them).
     Skipped(Summary),
     /// The voice stands only a little over the room's sound.
@@ -41,15 +44,18 @@ impl Note {
     /// What it is about (a place, or the microphone), whatever its countdown says.
     fn about(&self) -> (Option<Loc>, bool) {
         match *self {
-            Note::Moving(to, _) | Note::Alike(to) => (Some(to), false),
+            // (A slide's toast stays put while the marks are read away.)
+            Note::Moving(to, _) | Note::Alike(to) | Note::Similar(Slide { into: to, .. }) => (Some(to), false),
             Note::Skipped(s) => (Some(s.from), false),
             Note::Weak => (None, true),
         }
     }
 
-    /// The one toast shown: a far place's before the words gone past unread, those before the faint microphone.
-    pub fn first(offer: Option<Offer>, skipped: Option<Summary>, weak: bool) -> Option<Note> {
-        offer.map(Note::of).or(skipped.map(Note::Skipped)).or(weak.then_some(Note::Weak))
+    /// The one toast shown: a far place's countdown, a slide into a look-alike, a far place that sounds alike, the words
+    /// gone past unread, the faint microphone, the first of them there is.
+    pub fn first(offer: Option<Offer>, slide: Option<Slide>, skipped: Option<Summary>, weak: bool) -> Option<Note> {
+        let moving = offer.filter(|o| o.left.is_some()).map(Note::of);
+        moving.or(slide.map(Note::Similar)).or(offer.map(Note::of)).or(skipped.map(Note::Skipped)).or(weak.then_some(Note::Weak))
     }
 }
 
@@ -96,6 +102,11 @@ pub fn text(note: &Note, chapters: &[Chapter]) -> (String, &'static [(&'static s
             (format!("Moving to {} {when}", place(chapters, to)), &[("Go now", Click::Go), ("Stay", Click::Stay)], Some(0))
         }
         Note::Alike(to) => (format!("Sounds like {}", place(chapters, to)), &[("Go there", Click::Go), ("Stay", Click::Stay)], Some(1)),
+        // (The ayah's numbers only: the line stays short beside three buttons.)
+        Note::Similar(s) => {
+            let buttons: &[_] = &[("Go back", Click::Back), ("Go there", Click::Go), ("Dismiss", Click::Dismiss)];
+            (format!("Went into a similar ayah ({}:{})", s.into.0, s.into.1), buttons, None)
+        }
         Note::Skipped(ref s) => (skipped(chapters, s), &[("Go back", Click::Back), ("Dismiss", Click::Dismiss)], None),
         Note::Weak => ("Mic is faint: hold it closer".into(), &[("Dismiss", Click::Dismiss)], None),
     }
@@ -231,9 +242,24 @@ mod tests {
         // The far place's toast and the look-alike's come first, the faint microphone's after.
         let offer = Offer { to: (2, 95, 1), left: Some(3.0) };
         let summary = Summary { from: (68, 45, 1), to: (68, 45, 5), words: 5, others: 0 };
-        assert_eq!(Note::first(Some(offer), Some(summary), true), Some(Note::of(offer)));
-        assert_eq!(Note::first(None, Some(summary), true), Some(Note::Skipped(summary)));
-        assert_eq!((Note::first(None, None, true), Note::first(None, None, false)), (Some(Note::Weak), None));
+        assert_eq!(Note::first(Some(offer), None, Some(summary), true), Some(Note::of(offer)));
+        assert_eq!(Note::first(None, None, Some(summary), true), Some(Note::Skipped(summary)));
+        assert_eq!((Note::first(None, None, None, true), Note::first(None, None, None, false)), (Some(Note::Weak), None));
+    }
+
+    #[test]
+    fn a_slide_into_a_similar_ayah_offers_to_go_back_go_there_or_dismiss_and_gives_way_to_a_countdown_only() {
+        let slide = Slide { from: (2, 63, 4), into: (2, 84, 5) };
+        let (line, buttons, on) = text(&Note::Similar(slide), &[]);
+        let want: &[_] = &[("Go back", Click::Back), ("Go there", Click::Go), ("Dismiss", Click::Dismiss)];
+        assert_eq!((line.as_str(), buttons, on), ("Went into a similar ayah (2:84)", want, None));
+        // Before a far place that sounds alike and the words gone past unread; a countdown (the reader about to be taken
+        // somewhere) before it.
+        let (alike, moving) = (Offer { to: (2, 84, 5), left: None }, Offer { to: (3, 1, 1), left: Some(4.0) });
+        let summary = Summary { from: (68, 45, 1), to: (68, 45, 5), words: 5, others: 0 };
+        assert_eq!(Note::first(Some(alike), Some(slide), Some(summary), true), Some(Note::Similar(slide)));
+        assert_eq!(Note::first(Some(moving), Some(slide), None, false), Some(Note::of(moving)));
+        assert_eq!(Note::first(None, Some(slide), Some(summary), false), Some(Note::Similar(slide)));
     }
 
     #[test]

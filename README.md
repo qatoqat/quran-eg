@@ -53,7 +53,10 @@ servers and kept in `~/.cache/quran-eg/fonts/`.
   motion (an easing curve and glide time each for the pointer and for either edge of
   the range, when to fade over instead of moving back or jumping ahead, how far it
   may run ahead at your pace, how long it waits for you while the range reaches back
-  to where you are heard).
+  to where you are heard). Words read past are marked until they are read, and so are
+  the next words of the ayah being read when you go on into a similar ayah (a
+  mutashabih: "Went into a similar ayah", with Go back, Go there and Dismiss), each kind
+  in its own colour; memorizing shows them over the hidden words.
 - **Memorizing (hifz)**: the header's lines button hides the mushaf's words; the ayahs' ends, the signs
   between the words (pause marks, the rub el hizb ۞, the sajdah sign ۩: the page font's own glyphs, or from
   the word's text with the fallback font where the font draws a sign with the letters), the surah banners and
