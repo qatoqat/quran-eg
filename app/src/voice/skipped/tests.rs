@@ -277,3 +277,83 @@ fn the_listener_catching_up_is_no_skip() {
     }
     assert!(m.skipped().is_empty(), "{:?}", m.skipped().summary());
 }
+
+#[test]
+fn reading_again_a_skip_is_marked_and_going_on_from_where_the_reading_had_got_to_is_not() {
+    // 68:43 and 68:44 read, a stop, and back to read 68:43 again: its 5th-8th words left out there.
+    let mut r = Reader::new();
+    r.read((68, 43, 1), 21);
+    r.hear((68, 44, 10), 3, "Paused");
+    r.t += 2.0;
+    r.read((68, 43, 1), 4);
+    r.read((68, 43, 9), 3);
+    assert_eq!(r.marked(), span((68, 43, 5), (68, 43, 8)));
+    // Back a few words to say them again (read on three), then on from where the reading had got to, two words short of
+    // it, or a word past it: nothing.
+    for to in [(68, 44, 2), (68, 44, 4), (68, 44, 5)] {
+        let mut r = Reader::new();
+        r.read((68, 43, 1), 15);
+        r.read((68, 43, 5), 4);
+        r.read(to, 3);
+        assert!(r.s.is_empty(), "on at {to:?}: {:?}", r.marked());
+    }
+    // The listener's own step back, two reports, and back with the reader: nothing.
+    let mut r = Reader::new();
+    r.read((68, 43, 1), 10);
+    r.hear((68, 43, 3), 0, "Locked");
+    r.hear((68, 43, 3), 2, "Locked");
+    r.read((68, 43, 11), 3);
+    assert!(r.s.is_empty(), "{:?}", r.marked());
+}
+
+#[test]
+fn words_a_report_the_hold_kept_back_was_on_are_not_skipped() {
+    // The reader stops at 68:43:6, the listener putting them two words back (followed); going on, it hears them at the
+    // 9th (held: far ahead of the pointer), at the 4th again (the hold drops them), then at the 10th (held, then
+    // followed): the 7th-9th were heard. Not heard there (the 4th again instead), they were left out.
+    for heard_there in [true, false] {
+        let mut t = 0.0;
+        let mut news = reads((68, 43, 1), 6, &mut t);
+        news.extend([((68, 43, 4), 0, "Locked", t + 0.32), ((68, 43, 4), 2, "Paused", t + 0.64)]);
+        t += 5.64;
+        let ninth = if heard_there { (68, 43, 9) } else { (68, 43, 4) };
+        news.extend([(ninth, 0, "Locked", t + 0.32), (ninth, 2, "Locked", t + 0.64), ((68, 43, 4), 2, "Locked", t + 0.96)]);
+        t += 0.96;
+        news.extend(reads((68, 43, 10), 2, &mut t));
+        let mut m = marker(&news);
+        let want = if heard_there { Vec::new() } else { span((68, 43, 7), (68, 43, 9)) };
+        assert_eq!(m.skipped().marks.keys().copied().collect::<Vec<_>>(), want, "heard there {heard_there}");
+    }
+}
+
+/// The user's reading of page 7 as the listener heard it (its log, 22 Nov): 2:42 to its end and a stop; 2:43:1 heard
+/// as the reader went back to 2:40 (its look-alike 2:47 weighed first) and read it again; then 2:42, 2:41 left out (the
+/// listener on 2:41:1 for a second, then at 2:42:3, held, with a plan for there before the hold let it go).
+const PAGE_7: &str = include_str!("../../../tests/fixtures/listen-page7-skip.jsonl");
+
+#[test]
+fn an_ayah_skipped_reading_again_is_marked_from_the_users_log() {
+    use super::super::link::{self, Event};
+    // As the user has it (tajweed timing: plans), and without.
+    for plans in [true, false] {
+        let mut settings = Settings::default();
+        settings.motion.follow_tajweed = plans;
+        let params = Params::of(&settings);
+        let mut m = Marker::default();
+        let lines: Vec<&str> = PAGE_7.lines().collect();
+        for (k, line) in lines.iter().enumerate() {
+            match link::parse(line) {
+                Some(Event::Heard(h)) => {
+                    let t = f64::from(h.t);
+                    m.heard(h, t, &params);
+                }
+                Some(Event::Replan(plan, t)) => m.replan(&plan, t, f64::from(t), &params),
+                _ => panic!("not a report: {line}"),
+            }
+            // Nothing until the jump is followed (the hold lets it go on the last report).
+            assert!(k + 1 == lines.len() || m.skipped().is_empty(), "plans {plans}, after {line}: {:?}", m.skipped().summary());
+        }
+        assert_eq!(m.skipped().summary(), Some(Summary { from: (2, 41, 2), to: (2, 42, 2), words: 19, others: 0 }), "plans {plans}");
+        assert_eq!(m.skipped().back_to(), Some(WordRef { chapter: 2, verse: 41, word: 1 }));
+    }
+}

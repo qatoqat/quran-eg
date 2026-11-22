@@ -7,9 +7,11 @@
 //! - `scroll`: which pages are near the viewport, and keeping the top line in
 //!   place while pages around it change height.
 //! - `chrome`: what surrounds the pages (notices, navigation, loading state).
+//! - `hifz`: memorizing, which hides the words where they are.
 
 mod blocks;
 mod chrome;
+mod hifz;
 mod paint;
 mod place;
 mod scroll;
@@ -19,7 +21,6 @@ mod page_check;
 mod tests;
 mod verses;
 
-use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -76,13 +77,13 @@ struct Space {
 /// The sizes every page shares, for a column this wide and the widest line seen
 /// so far (at scale 1). All pages follow that line: if it doesn't fit the column,
 /// everything is scaled down together, and every page's lines are as wide as it.
-/// Memorizing, no word says what it means.
+/// (Memorizing changes none of it: what it hides keeps its place.)
 fn metrics_for(s: &Settings, muted: egui::Color32, column: f32, widest: Option<f32>) -> Metrics {
     let fit = widest.filter(|w| *w > column).map_or(1.0, |w| column / w);
     let em = settings::mushaf_em(s.arabic_font_scale) * fit;
     let wbw = &s.word_by_word;
-    let (translation, transliteration) = (wbw.show_translation && !s.hifz, wbw.show_transliteration && !s.hifz);
-    let tooltip = wbw.display == WbwDisplay::Tooltip && !s.hifz;
+    let (translation, transliteration) = (wbw.show_translation, wbw.show_transliteration);
+    let tooltip = wbw.display == WbwDisplay::Tooltip;
     let meanings = (translation || transliteration) && wbw.display != WbwDisplay::Tooltip;
     let word_gap = settings::word_gap(s.word_spacing);
     Metrics {
@@ -99,7 +100,6 @@ fn metrics_for(s: &Settings, muted: egui::Color32, column: f32, widest: Option<f
         translation,
         transliteration,
         tooltip,
-        memorizing: s.hifz,
         muted,
     }
 }
@@ -154,8 +154,8 @@ pub struct Reader {
     quiet: bool,
     /// The height of the view when last drawn.
     seen_height: f32,
-    /// Memorizing: the words clicked to show them.
-    revealed: HashSet<(u16, u16, u16)>,
+    /// Memorizing: what it hides, and the words clicked to show them.
+    veil: hifz::Veil,
 }
 
 impl Reader {
@@ -268,7 +268,7 @@ impl Reader {
             touched: false,
             quiet: false,
             seen_height: 0.0,
-            revealed: HashSet::new(),
+            veil: hifz::Veil::default(),
         }
     }
 
@@ -422,7 +422,7 @@ impl Reader {
         let s = env.settings;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         (s.arabic_font_scale, s.translation_font_scale, s.word_spacing, s.mushaf_font as u8).hash(&mut hasher);
-        (s.word_by_word.show_translation, s.word_by_word.show_transliteration, s.word_by_word.display as u8, s.hifz).hash(&mut hasher);
+        (s.word_by_word.show_translation, s.word_by_word.show_transliteration, s.word_by_word.display as u8).hash(&mut hasher);
         let style = hasher.finish();
         if self.style != style {
             self.style = style;
@@ -440,9 +440,7 @@ impl Reader {
         let area = ui.available_rect_before_wrap();
         // Memorizing, a word is clicked to show it; the words shown are hidden again when it ends.
         let hifz = env.settings.hifz && !self.quiet;
-        if !env.settings.hifz && !self.revealed.is_empty() {
-            self.revealed.clear();
-        }
+        self.veil.frame(&ctx, env.settings.hifz);
         let pages_area = ui.allocate_rect(area, if hifz { Sense::click() } else { Sense::hover() });
         let width = (settings::content_width_px(env.settings.content_width) as f32).min(area.width());
         let column = Rect::from_center_size(area.center(), vec2(width - 2.0 * COLUMN_PAD, area.height()));
@@ -473,7 +471,7 @@ impl Reader {
         let pages_top = top + self.top_height;
         self.paint_pages(ui, env, &metrics, space, pages_top, &mut open);
         if hifz {
-            self.reveal(ui, &pages_area);
+            self.veil.input(ui, &pages_area, &self.words);
         }
         self.bottom_chrome(ui, env, space, pages_top + pages, &mut open);
         if let Some(offset) = crate::kit::scroll_bar(ui, env.colors, area, self.scroll, total) {
@@ -493,22 +491,6 @@ impl Reader {
         open
     }
 
-    /// Memorizing: the word clicked shows, or hides again (the words on screen are this frame's).
-    fn reveal(&mut self, ui: &Ui, pages: &egui::Response) {
-        let word = |at: egui::Pos2| self.words.iter().find(|w| w.0.1 > 0 && w.1.contains(at)).map(|w| w.0);
-        if pages.hover_pos().and_then(word).is_some() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        }
-        if pages.clicked()
-            && let Some(at) = pages.interact_pointer_pos().and_then(word)
-        {
-            if !self.revealed.remove(&at) {
-                self.revealed.insert(at);
-            }
-            ui.ctx().request_repaint();
-        }
-    }
-
     fn paint_pages(
         &mut self,
         ui: &mut Ui,
@@ -521,6 +503,9 @@ impl Reader {
         let Space { area, column } = space;
         let painter = ui.painter_at(area);
         let hover = ui.rect_contains_pointer(area).then(|| ui.input(|i| i.pointer.hover_pos())).flatten();
+        let shade = self.veil.shade(ui.input(|i| i.time));
+        // Memorizing hides the translations where they are: laid out as ever, drawn faded or not at all (untouchable).
+        let notes = shade.map_or(1.0, |s| s.notes());
         let canvas = paint::Canvas {
             painter: &painter,
             colors: env.colors,
@@ -533,7 +518,7 @@ impl Reader {
             lens: env.lens,
             vivid: Default::default(),
             slots: Default::default(),
-            shown: env.settings.hifz.then_some(&self.revealed),
+            shade,
         };
         let left = (column.center().x - metrics.line_width / 2.0).round();
         let translations = env.settings.page_translations();
@@ -562,7 +547,9 @@ impl Reader {
             let list: Vec<&Verse> =
                 block.page.verse_keys.iter().filter_map(|k| self.feed.verses.iter().find(|v| &v.verse_key == k)).collect();
             let builder = egui::UiBuilder::new().max_rect(rect).id_salt(("translations", block.key));
+            let builder = if notes <= 0.0 { builder.invisible() } else { builder };
             let mut child = ui.new_child(builder.layout(egui::Layout::top_down(egui::Align::Min)));
+            child.multiply_opacity(notes);
             child.set_clip_rect(area);
             if let Some(to) = verses::show(&mut child, env, &mut self.notes, &list) {
                 *open = Some(to);

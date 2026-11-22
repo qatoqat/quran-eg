@@ -54,10 +54,14 @@ servers and kept in `~/.cache/quran-eg/fonts/`.
   the range, when to fade over instead of moving back or jumping ahead, how far it
   may run ahead at your pace, how long it waits for you while the range reaches back
   to where you are heard).
-- **Memorizing (hifz)**: the header's lines button hides the mushaf's words; the ayahs' ends, the surah
-  banners and the Bismillah line stay, and the meanings and translations go (the Bismillah's too). A word
-  clicked shows until it is clicked again; the words shown are forgotten when memorizing ends or the view
-  changes. The voice pointer follows over the hidden words as over the shown ones. Saved in the settings.
+- **Memorizing (hifz)**: the header's lines button hides the mushaf's words; the ayahs' ends, the signs
+  between the words (pause marks, the rub el hizb ۞, the sajdah sign ۩: the page font's own glyphs, or from
+  the word's text with the fallback font where the font draws a sign with the letters), the surah banners and
+  the Bismillah line stay, and the meanings and translations go (the Bismillah's too). Only what is drawn
+  changes: everything keeps its place, nothing is loaded or laid out again, and the words fade out and in
+  (0.2 s), as does a word clicked, which shows until it is clicked again; the words shown are forgotten when
+  memorizing ends or the view changes. The voice pointer follows over the hidden words as over the shown
+  ones. Saved in the settings.
 - **Search**: suggestions under the search box (shortcuts such as `2:255`,
   `juz 30`, `page 3`, `kahf 10`, and matching verses), and a results view with
   highlighted matches and paging.

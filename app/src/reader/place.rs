@@ -52,8 +52,6 @@ pub struct Metrics {
     pub translation: bool,
     pub transliteration: bool,
     pub tooltip: bool,
-    /// Memorizing: not even the Bismillah line's meaning is shown.
-    pub memorizing: bool,
     pub muted: Color32,
 }
 
@@ -75,7 +73,6 @@ impl Metrics {
             .iter()
             .map(|item| match item {
                 Item::SurahHeader { .. } => self.line_height() + self.line_gap,
-                Item::Bismillah { .. } if self.memorizing => self.line_height() + self.line_gap,
                 Item::Bismillah { .. } => self.line_height() + self.meaning_gap + self.meaning_font * 1.6 + self.line_gap,
                 Item::Line { .. } => self.line_height() + meaning + self.line_gap,
                 Item::Flow { cells, .. } => (cells.len() as f32 / 8.0).ceil() * (self.line_height() + meaning) + 40.0,
@@ -98,13 +95,18 @@ impl Metrics {
         ] {
             v.to_bits().hash(state);
         }
-        (self.meanings, self.translation, self.transliteration, self.tooltip, self.memorizing, self.muted).hash(state);
+        (self.meanings, self.translation, self.transliteration, self.tooltip, self.muted).hash(state);
     }
 }
 
 /// Sprite key of a word cell.
 pub fn word_key(location: &str) -> u64 {
     key(&("w", location))
+}
+
+/// Sprite key of a word's signs drawn on their own from its text (memorizing hides the rest).
+pub fn sign_key(location: &str) -> u64 {
+    key(&("s", location))
 }
 
 /// Sprite key of a label of a surah banner or Bismillah line.
@@ -400,10 +402,7 @@ pub fn place(mut input: Input<'_>, stamp: u64) -> Placed {
                 let (words, meaning, done) = bismillah_row(&mut input, *chapter);
                 settled &= done;
                 natural = natural.max(words.iter().map(|w| w.width).sum::<f32>() + m.em * 0.36);
-                let height = match m.memorizing {
-                    true => m.line_height() + m.line_gap,
-                    false => m.line_height() + m.meaning_gap.max(0.0) + (input.layout)(bismillah_job(&meaning, &m)).size().y + m.line_gap,
-                };
+                let height = m.line_height() + m.meaning_gap.max(0.0) + (input.layout)(bismillah_job(&meaning, &m)).size().y + m.line_gap;
                 (RowKind::Bismillah { words, meaning }, height)
             }
             Item::Line { cells, align, .. } => {
@@ -473,7 +472,6 @@ mod tests {
             translation: false,
             transliteration: false,
             tooltip: false,
-            memorizing: false,
             muted: Color32::GRAY,
         }
     }

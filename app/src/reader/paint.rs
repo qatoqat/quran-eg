@@ -10,7 +10,8 @@ use quran_core::parse::revelation_label;
 use quran_core::settings::MUSHAF_LINE;
 
 use super::blocks::{BANNER_SIDE_EM, Block, LoadedSheet, banner};
-use super::place::{self, Metrics, Mode, PILL_HEIGHT, Placed, Row, RowKind, Word, label_key};
+use super::hifz::{self, Shade};
+use super::place::{self, Metrics, Mode, PILL_HEIGHT, Placed, Row, RowKind, Word, label_key, sign_key};
 use crate::pointer::Lens;
 use crate::sheet::{Kind, Sprite};
 use crate::theme::Colors;
@@ -35,9 +36,9 @@ fn ink(sprite: &Sprite) -> Option<egui::Vec2> {
 }
 
 /// Add the part of a quad that lies in the lens to `mesh`, cut into small cells
-/// whose corners carry the lens's strength there — which gives the lens its
-/// round, soft-edged shape without a mask.
-fn light(mesh: &mut Mesh, lens: &Lens, rect: Rect, uv: Rect) {
+/// whose corners carry the lens's strength there (times `alpha`, the quad's own
+/// opacity) — which gives the lens its round, soft-edged shape without a mask.
+fn light(mesh: &mut Mesh, lens: &Lens, rect: Rect, uv: Rect, alpha: f32) {
     const CELL: f32 = 3.0;
     let area = rect.intersect(lens.bounds());
     if !area.is_positive() {
@@ -52,7 +53,7 @@ fn light(mesh: &mut Mesh, lens: &Lens, rect: Rect, uv: Rect) {
         );
         let share = (at - rect.min) / rect.size();
         let texel = uv.min + share * uv.size();
-        let level = (lens.strength(at) * 255.0).round() as u8;
+        let level = (lens.strength(at) * alpha * 255.0).round() as u8;
         (at, texel, level)
     };
     for row in 0..rows {
@@ -96,16 +97,42 @@ pub fn baseline(top: f32, em: f32, metrics: Option<(f32, f32)>) -> f32 {
 
 /// Where a sprite's parts go, right to left from `right` on `baseline` at `em` points a glyph em, each
 /// corner on a pixel by `snap`: every drawn part's rectangle and its place in the sheet.
-pub fn quads(sprite: &Sprite, (right, baseline): (f32, f32), em: f32, snap: impl Fn(f32) -> f32) -> impl Iterator<Item = (Rect, Rect)> {
+#[cfg(not(target_arch = "wasm32"))]
+pub fn quads(sprite: &Sprite, at: (f32, f32), em: f32, snap: impl Fn(f32) -> f32) -> impl Iterator<Item = (Rect, Rect)> {
+    placed_parts(sprite, at, em, snap).map(|(_, rect, uv)| (rect, uv))
+}
+
+/// Where a sprite's parts go (as `quads` says), each with the index of its part.
+fn placed_parts(sprite: &Sprite, (right, baseline): (f32, f32), em: f32, snap: impl Fn(f32) -> f32) -> impl Iterator<Item = (usize, Rect, Rect)> {
     let mut pen = right;
-    sprite.parts.iter().filter_map(move |part| {
+    sprite.parts.iter().enumerate().filter_map(move |(i, part)| {
         pen -= part.advance * em;
         (part.size[0] > 0.0 && part.size[1] > 0.0).then(|| {
             let min = pos2(snap(pen + part.left * em), snap(baseline - part.top * em));
             let rect = Rect::from_min_size(min, vec2(part.size[0] * em, part.size[1] * em));
-            (rect, Rect::from_min_max(pos2(part.uv[0], part.uv[1]), pos2(part.uv[2], part.uv[3])))
+            (i, rect, Rect::from_min_max(pos2(part.uv[0], part.uv[1]), pos2(part.uv[2], part.uv[3])))
         })
     })
+}
+
+/// How opaque a sprite's parts are drawn: `alpha`, but for the first `keep.0` and the last `keep.1` (a word's signs,
+/// which memorizing keeps), drawn whole.
+#[derive(Clone, Copy)]
+struct Fade {
+    alpha: f32,
+    keep: (usize, usize),
+}
+
+impl Fade {
+    const WHOLE: Fade = Fade { alpha: 1.0, keep: (0, 0) };
+
+    fn all(alpha: f32) -> Fade {
+        Fade { alpha, keep: (0, 0) }
+    }
+
+    fn of(&self, part: usize, parts: usize) -> f32 {
+        if part < self.keep.0 || part + self.keep.1 >= parts { 1.0 } else { self.alpha }
+    }
 }
 
 /// An ayah's number drawn as text, without its medallion: a ring round `centre`, and the baseline that centres
@@ -145,8 +172,9 @@ pub struct Canvas<'a> {
     pub vivid: std::cell::RefCell<Option<Mesh>>,
     /// Every word painted, with its location and box: the voice pointer's map.
     pub slots: std::cell::RefCell<Vec<Slot>>,
-    /// Memorizing: the only words of the ayahs drawn (the rest keep their places, unseen); `None` draws them all.
-    pub shown: Option<&'a std::collections::HashSet<(u16, u16, u16)>>,
+    /// Memorizing (or fading into or out of it): how much of the ayahs' words, meanings and translations shows, every
+    /// one keeping its place. `None`: all of them.
+    pub shade: Option<Shade<'a>>,
 }
 
 /// A word on screen: its location (surah, ayah, word), its box (as tall as its line), the y of its
@@ -162,6 +190,18 @@ fn location(s: &str) -> Option<(u16, u16, u16)> {
 impl Canvas<'_> {
     fn snap(&self, v: f32) -> f32 {
         (v * self.pixels_per_point).round() / self.pixels_per_point
+    }
+
+    /// How opaque the meanings are (memorizing hides them in their places).
+    fn notes(&self) -> f32 {
+        self.shade.map_or(1.0, |s| s.notes())
+    }
+
+    /// The painter, drawing this opaque.
+    fn faded(&self, alpha: f32) -> Painter {
+        let mut painter = self.painter.clone();
+        painter.multiply_opacity(alpha);
+        painter
     }
 
     /// Paint `block` with the left edge of its lines and its top at `origin`.
@@ -206,10 +246,10 @@ impl Canvas<'_> {
                 if let Some(Item::Bismillah { chapter }) = page.items.get(row.item) {
                     self.bismillah_slots(at, words, *chapter, sheet);
                 }
-                if !m.memorizing {
+                if self.notes() > 0.0 {
                     let y = at.y + m.line_height() + m.meaning_gap.max(0.0);
                     let meaning = self.painter.layout_job(place::bismillah_job(meaning, m));
-                    self.painter.galley(pos2(at.x + m.line_width / 2.0, y), meaning, m.muted);
+                    self.faded(self.notes()).galley(pos2(at.x + m.line_width / 2.0, y), meaning, m.muted);
                 }
             }
             RowKind::Line { words } => {
@@ -253,7 +293,7 @@ impl Canvas<'_> {
 
     /// One word: its sprite (or what stands in for it) centred in its box on
     /// the line's baseline, and its meaning underneath. Memorizing, an ayah's word not
-    /// clicked to show it is not drawn (its end is, as is the Bismillah line).
+    /// clicked to show it is not drawn but for its signs (its end is, as is the Bismillah line).
     fn word(&self, row: Pos2, word: &Word, page: &PageBlock, sheet: Option<&LoadedSheet>, mesh: Option<&mut Mesh>) {
         let (m, c) = (self.metrics, self.colors);
         let left = row.x + word.x;
@@ -266,40 +306,57 @@ impl Canvas<'_> {
             Item::Line { cells, .. } | Item::Flow { cells, .. } => cells.get(index),
             _ => None,
         });
-        // The ayah's words (not its end) are the voice pointer's places.
+        // The ayah's words (not its end) are the voice pointer's places, and what memorizing hides.
         let at = cell.filter(|c| !c.is_end).and_then(|c| location(&c.location));
-        let hidden = at.is_some_and(|at| self.shown.is_some_and(|shown| !shown.contains(&at)));
+        let alpha = at.zip(self.shade).map_or(1.0, |(at, shade)| shade.word(at));
+        let marks = cell.map(|c| c.marks).unwrap_or_default();
+        // A hidden word's signs drawn on their own from its text, its right end at `right` (memorizing).
+        let signs = |mesh: &mut Mesh, right: &dyn Fn(&Sprite) -> f32| {
+            let signs = cell.filter(|_| alpha < 1.0 && marks.any()).and_then(|c| sheet?.sprites.get(&sign_key(&c.location)));
+            if let Some(signs) = signs {
+                self.sprite(mesh, signs, right(signs), baseline, c.fg, Fade::all(1.0 - alpha));
+            }
+        };
         match (word.mode, sprite, mesh) {
-            _ if hidden => {}
             (Mode::Glyph, Some(sprite), Some(mesh)) => {
-                self.sprite(mesh, sprite, centre + sprite.advance * m.em / 2.0, baseline, c.fg);
+                let right = centre + sprite.advance * m.em / 2.0;
+                // Its signs are glyphs of its own, kept whole; or drawn with its letters, then from its text at its end.
+                let kept = if alpha < 1.0 { hifz::sign_parts(&marks, &sprite.parts) } else { Some((0, 0)) };
+                self.sprite(mesh, sprite, right, baseline, c.fg, Fade { alpha, keep: kept.unwrap_or_default() });
+                if kept.is_none() && cell.is_some_and(|c| c.qpc) {
+                    signs(mesh, &|text| right - (sprite.advance - text.advance) * m.em);
+                }
             }
             (Mode::Text { ringed }, Some(sprite), Some(mesh)) => {
                 let ink = if ringed { c.accent } else { c.fg };
+                let right = centre + sprite.advance * m.em / 2.0;
                 if ringed {
                     let baseline = ring(self.painter, pos2(centre, middle), sprite, m.em, ink);
-                    self.sprite(mesh, sprite, centre + sprite.advance * m.em / 2.0, baseline, ink);
+                    self.sprite(mesh, sprite, right, baseline, ink, Fade::WHOLE);
                 } else {
-                    self.sprite(mesh, sprite, centre + sprite.advance * m.em / 2.0, baseline, ink);
+                    self.sprite(mesh, sprite, right, baseline, ink, Fade::all(alpha));
+                    signs(mesh, &|_| right);
                 }
                 // A word whose glyph the page font should have drawn but could not: marked.
                 if sheet.is_some_and(|s| s.failed_glyphs.contains(&word.key)) {
                     self.problem_mark(pos2(left, top));
                 }
             }
+            _ if alpha <= 0.0 => {}
             (Mode::Missing, ..) => {
                 let font = FontId::proportional(m.em * 0.45);
-                self.painter.text(pos2(centre, middle), Align2::CENTER_CENTER, MISSING_WORD, font, c.muted);
+                self.faded(alpha).text(pos2(centre, middle), Align2::CENTER_CENTER, MISSING_WORD, font, c.muted);
             }
             // No font yet (or the sprite is on its way): a marked box where the word will be.
-            _ => placeholder(self.painter, c, pos2(centre, middle), word.width, m.em),
+            _ => placeholder(&self.faded(alpha), c, pos2(centre, middle), word.width, m.em),
         }
         let slot = Rect::from_min_size(pos2(left, top), vec2(word.width, m.line_height()));
         if let Some(at) = at {
             self.slots.borrow_mut().push((at, slot, baseline, m.em));
         }
-        // "On hover": the hovered word is tinted and says what it means in a tooltip.
+        // "On hover": the hovered word is tinted and says what it means in a tooltip (not while memorizing).
         if m.tooltip
+            && self.shade.is_none()
             && self.hover.is_some_and(|p| slot.contains(p))
             && let Some(cell) = cell.filter(|c| !c.is_end)
         {
@@ -311,9 +368,10 @@ impl Canvas<'_> {
                 *self.tip.borrow_mut() = Some((slot, lines));
             }
         }
-        if let Some(job) = cell.filter(|_| word.meaning.is_some()).and_then(|c| place::meaning_job(c, m)) {
+        let notes = self.notes();
+        if let Some(job) = cell.filter(|_| word.meaning.is_some() && notes > 0.0).and_then(|c| place::meaning_job(c, m)) {
             let meaning = self.painter.layout_job(job);
-            self.painter.galley(pos2(centre, top + m.line_height() + m.meaning_gap), meaning, m.muted);
+            self.faded(notes).galley(pos2(centre, top + m.line_height() + m.meaning_gap), meaning, m.muted);
         }
     }
 
@@ -327,19 +385,24 @@ impl Canvas<'_> {
         }
     }
 
-    /// Add a sprite's parts to the mesh, right to left from `right`, on `baseline`.
-    fn sprite(&self, mesh: &mut Mesh, sprite: &Sprite, right: f32, baseline: f32, ink: Color32) {
+    /// Add a sprite's parts to the mesh, right to left from `right`, on `baseline`, as opaque as `fade` says.
+    fn sprite(&self, mesh: &mut Mesh, sprite: &Sprite, right: f32, baseline: f32, ink: Color32, fade: Fade) {
         let tint = match sprite.kind {
             Kind::Mask => ink,
             Kind::Color => Color32::WHITE,
         };
-        for (rect, uv) in quads(sprite, (right, baseline), self.metrics.em, |v| self.snap(v)) {
-            mesh.add_rect_with_uv(rect, uv, tint);
+        let parts = sprite.parts.len();
+        for (i, rect, uv) in placed_parts(sprite, (right, baseline), self.metrics.em, |v| self.snap(v)) {
+            let alpha = fade.of(i, parts);
+            if alpha <= 0.0 {
+                continue;
+            }
+            mesh.add_rect_with_uv(rect, uv, tint.gamma_multiply(alpha));
             if sprite.kind == Kind::Color
                 && let Some(lens) = &self.lens
                 && let Some(vivid) = self.vivid.borrow_mut().as_mut()
             {
-                light(vivid, lens, rect, uv);
+                light(vivid, lens, rect, uv, alpha);
             }
         }
     }
@@ -400,7 +463,7 @@ impl Canvas<'_> {
         let mut draw = |sprite: &Sprite, right: f32| {
             let part = sprite.parts.first().copied();
             let (height, top) = part.map_or((0.0, 0.0), |p| (p.size[1] * m.em, p.top * m.em));
-            self.sprite(mesh, sprite, right, row.center().y - height / 2.0 + top, c.fg);
+            self.sprite(mesh, sprite, right, row.center().y - height / 2.0 + top, c.fg, Fade::WHOLE);
         };
         draw(name, row.center().x + name.advance * m.em / 2.0);
         if let Some(place) = label(banner::PLACE) {

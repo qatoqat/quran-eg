@@ -385,10 +385,10 @@ fn mushaf_font(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
     }
 }
 
-/// While memorizing, what says what the words mean is hidden whatever is chosen here.
+/// While memorizing, what says what the words mean is hidden whatever is chosen here (in its place).
 fn memorizing(ui: &mut Ui, colors: &Colors, settings: &Settings) {
     if settings.hifz {
-        help(ui, colors, "Hidden while memorizing (the eye in the top bar).");
+        help(ui, colors, "Hidden while memorizing, keeping its place (the lines button in the top bar).");
     }
 }
 

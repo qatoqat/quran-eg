@@ -15,7 +15,7 @@ use quran_core::lists::find_chapter;
 use quran_core::mushaf_layout::{Item, PageBlock};
 use quran_core::parse::revelation_label;
 
-use super::place::{Placed, label_key, word_key};
+use super::place::{Placed, label_key, sign_key, word_key};
 use crate::arabic::{ArabicFont, BANNER_FRAME_TEXT, Ornaments, banner_name_text};
 use crate::glyphs::{PageGlyphs, Palette};
 use crate::sheet::{self, Request, Sprite, Text, TextFont};
@@ -201,18 +201,18 @@ fn place_arabic(place: &str) -> Option<&'static str> {
     }
 }
 
-/// Everything a page's sheet holds: its words, and the labels of its surah
-/// banners and Bismillah lines. Font 0 is the page's, font 1 page 1's.
+/// Everything a page's sheet holds: its words (and the signs of those that have
+/// any, on their own, for memorizing), and the labels of its surah banners and
+/// Bismillah lines. Font 0 is the page's, font 1 page 1's.
 pub fn requests(page: &PageBlock, chapters: &[Chapter], bismillah: Option<&Verse>) -> Vec<Request> {
     let mut out = Vec::new();
     let label = |key, text: String, em| Request { key, glyph: None, text: Some(Text::plain(text, em)) };
     let ornament = |key, text: String, em, font| Request { key, glyph: None, text: Some(Text { text, em, font }) };
     for item in &page.items {
         match item {
-            Item::Line { cells, .. } | Item::Flow { cells, .. } => out.extend(cells.iter().map(|c| Request {
-                key: word_key(&c.location),
-                glyph: c.glyph.clone().filter(|_| c.page.is_some() && c.page == page.page).map(|g| (0, g)),
-                text: c.text.clone().filter(|t| !t.trim().is_empty()).map(|text| {
+            Item::Line { cells, .. } | Item::Flow { cells, .. } => {
+                for c in cells {
+                    let text = c.text.clone().filter(|t| !t.trim().is_empty());
                     let em = match (c.qpc, c.is_end) {
                         (true, _) => QPC_EM,
                         (false, true) => NUMBER_EM,
@@ -220,9 +220,18 @@ pub fn requests(page: &PageBlock, chapters: &[Chapter], bismillah: Option<&Verse
                     };
                     // An ayah number that is not QPC text is drawn plain, in a ring.
                     let font = if c.is_end && !c.qpc { TextFont::Number } else { TextFont::Fallback };
-                    Text { text, em, font }
-                }),
-            })),
+                    out.push(Request {
+                        key: word_key(&c.location),
+                        glyph: c.glyph.clone().filter(|_| c.page.is_some() && c.page == page.page).map(|g| (0, g)),
+                        text: text.clone().map(|text| Text { text, em, font }),
+                    });
+                    // The word's signs alone, where its text has them: drawn while memorizing hides the word, if the
+                    // page font does not draw them apart from its letters.
+                    if let Some(text) = text.filter(|_| c.marks.any() && !c.is_end) {
+                        out.push(Request { key: sign_key(&c.location), glyph: None, text: Some(Text { text, em, font: TextFont::Signs }) });
+                    }
+                }
+            }
             Item::SurahHeader { chapter } => {
                 // The printed-mushaf banner: a frame and the calligraphic name (drawn
                 // only when the ornament fonts are there)...
@@ -416,6 +425,23 @@ mod tests {
         assert_eq!(requests(page, &[], None).len(), 11);
         let block = Block::new((Some(604), 0), page.clone(), 100.0);
         assert_ne!(content_stamp(&block, &[], None), content_stamp(&block, &[chapter(112)], None));
+    }
+
+    #[test]
+    fn a_word_with_signs_has_them_on_their_own_too() {
+        let mut v = verse("2:2", 2, 3);
+        v.qpc_uthmani_hafs = Some("ذَٰلِكَ ٱلۡكِتَٰبُ لَا رَيۡبَۛ فِيهِۛ هُدٗى لِّلۡمُتَّقِينَ\u{a0}٢".into());
+        let layout = build_layout(&[v], Trim::default());
+        let all = requests(&layout.pages[0], &[], None);
+        let signs: Vec<(u64, &str, TextFont)> = all
+            .iter()
+            .filter(|r| r.glyph.is_none())
+            .filter_map(|r| r.text.as_ref().map(|t| (r.key, t.text.as_str(), t.font)))
+            .filter(|r| r.2 == TextFont::Signs)
+            .collect();
+        // The muʿānaqa dots of رَيۡبَۛ and فِيهِۛ, each from the word's text (as big as the word's text).
+        assert_eq!(signs, [(sign_key("2:2:4"), "رَيۡبَۛ", TextFont::Signs), (sign_key("2:2:5"), "فِيهِۛ", TextFont::Signs)]);
+        assert_eq!(all.len(), 8 + 2, "every word, and the two signs");
     }
 
     #[test]

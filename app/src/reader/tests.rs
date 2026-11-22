@@ -245,43 +245,100 @@ fn a_bismillah_line_is_four_places_for_the_voice_pointer_and_its_surah_head_can_
     assert!(bench.reader.words.iter().find(|w| w.0 == (2, 0, 1)).is_none_or(|w| w.1.top() < 0.0));
 }
 
+/// Each word without a font is a marked box (0.7 em tall, `em` points a glyph em): how many are drawn, and how
+/// opaque the faintest is.
+fn boxes(out: &egui::FullOutput, em: f32) -> (usize, u8) {
+    let word = |r: &egui::epaint::RectShape| (r.rect.height() - em * 0.7).abs() < 0.01;
+    let rects = out.shapes.iter().filter_map(|s| if let egui::Shape::Rect(r) = &s.shape { word(r).then_some(r.fill.a()) } else { None });
+    rects.fold((0, u8::MAX), |(n, least), a| (n + 1, least.min(a)))
+}
+
+/// How many word meanings are drawn.
+fn meanings(out: &egui::FullOutput) -> usize {
+    out.shapes.iter().filter(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "a meaning")).count()
+}
+
+/// Whether the frame asked for another.
+fn wants_frame(out: &egui::FullOutput) -> bool {
+    out.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.repaint_delay < std::time::Duration::from_secs(1))
+}
+
+/// A page's placement, height and translations' height, and its rows' tops and heights.
+type PageLayout = (Option<u64>, f32, f32, Vec<(f32, f32)>);
+
+/// What the layout and the scroll are.
+#[derive(Debug, PartialEq)]
+struct Layout {
+    pages: Vec<PageLayout>,
+    scroll: f32,
+    /// The loads asked for.
+    loads: (u64, bool),
+    /// Every word's box on screen.
+    words: Vec<((u16, u16, u16), Rect)>,
+}
+
+impl Bench {
+    fn layout(&self) -> Layout {
+        let pages = self.reader.blocks.iter().map(|b| {
+            let rows = b.placed.as_ref().map_or_else(Vec::new, |p| p.rows.iter().map(|r| (r.y, r.height)).collect());
+            (b.placed.as_ref().map(|p| p.stamp), b.height, b.below, rows)
+        });
+        let words = self.reader.words.iter().map(|w| (w.0, w.1)).collect();
+        Layout { pages: pages.collect(), scroll: self.reader.scroll, loads: (self.reader.generation, self.reader.fetch.is_some()), words }
+    }
+}
+
 #[test]
-fn memorizing_hides_the_ayahs_words_but_keeps_their_places_and_a_click_shows_one() {
+fn memorizing_hides_the_ayahs_words_in_their_places_and_lays_out_nothing_again() {
     let mut bench = Bench::new(sixty_verses());
-    // Each word without a font is a marked box.
-    let boxes = |out: &egui::FullOutput| out.shapes.iter().filter(|s| matches!(s.shape, egui::Shape::Rect(_))).count();
-    bench.frames(3);
-    let places: Vec<_> = bench.reader.words.iter().map(|w| w.0).collect();
+    bench.settings.show_page_translation = true;
+    bench.reader.scroll = 700.0;
+    bench.frames(8);
+    let em = bench.reader.metrics_now(&bench.settings, &bench.colors).em;
+    let before = bench.layout();
+    let shown = bench.frame(Vec::new());
+    let ((all, opaque), notes) = (boxes(&shown, em), meanings(&shown));
+    assert!(all > 20 && notes > 20 && !wants_frame(&shown), "{all} boxes, {notes} meanings, settled");
+
+    // Memorizing: the words fade out over a fifth of a second (frames of 1/60 s), and then no frame is asked for.
     bench.settings.hifz = true;
-    bench.frames(3);
-    let hidden = boxes(&bench.frame(Vec::new()));
-    // The voice pointer's places stay (without the meanings the lines move up, and more come into view).
-    let memorizing: Vec<_> = bench.reader.words.iter().map(|w| w.0).collect();
-    assert!(places.iter().all(|p| memorizing.contains(p)) && memorizing.len() > places.len());
+    bench.frames(5);
+    let fading = bench.frame(Vec::new());
+    let (count, faintest) = boxes(&fading, em);
+    assert!(count == all && faintest < opaque && faintest > 0 && wants_frame(&fading), "{count} of {all}, at {faintest} of {opaque}");
+    bench.frames(12);
+    let hidden = bench.frame(Vec::new());
+    assert!(!wants_frame(&hidden), "done fading");
+    let (count, _) = boxes(&hidden, em);
+    assert!(count < all && meanings(&hidden) == 0, "{count} of {all} boxes, {} meanings", meanings(&hidden));
+    // Nothing moved: the same placements, heights (the translations' too) and scroll; nothing loaded again.
+    assert_eq!(bench.layout(), before);
+
     // Each word of an ayah is a box not drawn (its end is drawn, as is the Bismillah line): all shown, all are there.
-    let words: Vec<_> = memorizing.iter().copied().filter(|w| w.1 > 0).collect();
-    bench.reader.revealed.extend(words.iter().copied());
-    let all = boxes(&bench.frame(Vec::new()));
-    assert!(words.len() > 20 && all - hidden == words.len(), "{all} boxes, {hidden} memorizing, {} words", words.len());
-    bench.reader.revealed.clear();
-    // A word clicked shows; clicked again, it hides.
-    bench.frames(1);
-    let word = *bench.reader.words.iter().find(|w| w.0 == (2, 2, 2)).expect("2:2:2 on screen");
+    let words: Vec<_> = bench.reader.words.iter().map(|w| w.0).filter(|w| w.1 > 0).collect();
+    bench.reader.veil.reveal(words.iter().copied());
+    assert_eq!(boxes(&bench.frame(Vec::new()), em).0, all);
+    assert!(words.len() > 20 && all - count == words.len(), "{all} boxes, {count} memorizing, {} words", words.len());
+    bench.reader.veil.reveal([]);
+    bench.frames(2);
+    // A word clicked shows, fading in; clicked again, it hides.
+    let word = *bench.reader.words.iter().find(|w| w.0.1 > 0 && w.0.2 == 2 && w.1.top() > 100.0).expect("a word in view");
     bench.click(word.1.center());
-    assert!(bench.reader.revealed.contains(&(2, 2, 2)));
-    assert_eq!(boxes(&bench.frame(Vec::new())), hidden + 1);
+    assert!(bench.reader.veil.revealed().contains(&word.0));
+    bench.frames(12);
+    assert_eq!(boxes(&bench.frame(Vec::new()), em).0, count + 1);
     bench.click(word.1.center());
-    assert!(bench.reader.revealed.is_empty());
-    assert_eq!(boxes(&bench.frame(Vec::new())), hidden);
-    // No meaning anywhere, the Bismillah line's neither (its row is a line and its space).
-    let m = bench.reader.metrics_now(&bench.settings, &bench.colors);
-    assert!(!m.meanings && !m.translation && !m.tooltip && m.memorizing);
-    let bismillah = &bench.reader.blocks[0].placed.as_ref().unwrap().rows[1];
-    assert!(matches!(bismillah.kind, super::place::RowKind::Bismillah { .. }) && (bismillah.height - m.line_height() - m.line_gap).abs() < 0.01);
-    // Memorizing ends: every word is drawn again, and the words clicked are forgotten.
+    bench.frames(12);
+    assert!(bench.reader.veil.revealed().is_empty());
+    assert_eq!(boxes(&bench.frame(Vec::new()), em).0, count);
+    assert_eq!(bench.layout(), before, "a click lays out nothing either");
+
+    // Memorizing ends: every word and meaning fades back, the words clicked are forgotten, and all is where it was.
     bench.click(word.1.center());
     bench.settings.hifz = false;
-    bench.frames(3);
-    assert!(bench.reader.revealed.is_empty());
-    assert_eq!(bench.reader.words.iter().map(|w| w.0).collect::<Vec<_>>(), places);
+    bench.frames(14);
+    let back = bench.frame(Vec::new());
+    assert!(bench.reader.veil.revealed().is_empty() && !wants_frame(&back));
+    assert_eq!((boxes(&back, em), meanings(&back)), ((all, opaque), notes));
+    assert_eq!(bench.layout(), before);
 }

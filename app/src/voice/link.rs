@@ -309,6 +309,15 @@ impl Link {
     }
 }
 
+/// The events a message gives (a line of the listener's log, too); a voice level is the link thread's.
+#[cfg(test)]
+pub fn parse(text: &str) -> Option<Event> {
+    match read(text)? {
+        Read::Event(e) => Some(e),
+        Read::Voice(..) => None,
+    }
+}
+
 impl Drop for Link {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -480,14 +489,6 @@ fn run(port: u16, cue: Option<&Cue>, events: &Sender<Event>, (visible, want): (&
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The events a message gives (a voice level is the link thread's).
-    fn parse(text: &str) -> Option<Event> {
-        match read(text)? {
-            Read::Event(e) => Some(e),
-            Read::Voice(..) => None,
-        }
-    }
 
     #[test]
     fn pointer_messages_parse_and_others_do_not() {

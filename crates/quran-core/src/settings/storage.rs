@@ -476,9 +476,9 @@ mod tests {
             let json = serde_json::json!({ "voice": { "model": raw } }).to_string();
             assert_eq!(from_json(&json).unwrap().voice.model, kept, "{raw:?}");
         }
-        // Memorizing hides the verse translations under the pages.
+        // Memorizing hides the verse translations under the pages where they are: they keep their place.
         let s = Settings { show_page_translation: true, hifz: true, ..Default::default() };
-        assert!(!s.page_translations() && Settings { hifz: false, ..s }.page_translations());
+        assert!(s.page_translations() && Settings { hifz: false, ..s }.page_translations());
     }
 
     #[test]

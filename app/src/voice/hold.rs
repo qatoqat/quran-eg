@@ -48,6 +48,11 @@ impl Hold {
         false
     }
 
+    /// A jump is held (the listener's place is there, not the pointer's).
+    pub fn holding(&self) -> bool {
+        self.held.is_some()
+    }
+
     /// Where and when the jump the last report taken confirmed was first heard (the reading arrived there then), once.
     pub fn confirmed(&mut self) -> Option<(f32, f64)> {
         self.confirmed.take()

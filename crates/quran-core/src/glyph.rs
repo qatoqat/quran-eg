@@ -93,6 +93,53 @@ pub fn choose_mode(cell: &WordCell, font_ready: bool) -> WordMode {
     }
 }
 
+/// The rub el hizb sign that opens a quarter of a hizb, before its first word.
+pub const RUB_EL_HIZB: char = '\u{06de}';
+/// The sajdah sign, after the word of a prostration.
+pub const SAJDAH: char = '\u{06e9}';
+
+/// A pause mark (waqf): ṣalā ۖ, qalā ۗ, mīm ۘ, lā ۙ, jīm ۚ, the paired dots of muʿānaqa ۛ, sīn ۜ (saktah).
+pub fn is_pause_mark(c: char) -> bool {
+    ('\u{06d6}'..='\u{06dc}').contains(&c)
+}
+
+/// The signs of the mushaf a word's text carries besides its letters: a rub el hizb ۞ before it, and after it its
+/// pause marks and the sajdah sign ۩. (A sīn written over a ṣād inside a word is a letter's mark, not a sign.) The
+/// QCF fonts give each sign a glyph of its own in the word's code: the first glyph for ۞, the last ones for the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Marks {
+    /// Bytes of the text taken by the ۞ that opens it (0: none).
+    pub opening: usize,
+    /// Byte where the signs that end it begin (the text's length: none), and how many there are.
+    pub closing: usize,
+    pub closing_count: u8,
+}
+
+impl Marks {
+    /// Where the signs are in `text`.
+    pub fn of(text: &str) -> Marks {
+        let opening = if text.starts_with(RUB_EL_HIZB) { RUB_EL_HIZB.len_utf8() } else { 0 };
+        let (mut closing, mut closing_count) = (text.len(), 0u8);
+        for (at, c) in text[opening..].char_indices().rev() {
+            if is_pause_mark(c) || c == SAJDAH {
+                (closing, closing_count) = (opening + at, closing_count + 1);
+            } else if !c.is_whitespace() {
+                break;
+            }
+        }
+        Marks { opening, closing, closing_count }
+    }
+
+    pub fn any(&self) -> bool {
+        self.opening > 0 || self.closing_count > 0
+    }
+
+    /// Whether the character at byte `at` of the text is one of the signs.
+    pub fn covers(&self, at: usize) -> bool {
+        at < self.opening || (self.closing_count > 0 && at >= self.closing)
+    }
+}
+
 /// `255` → `٢٥٥`
 pub fn arabic_number(n: u16) -> String {
     n.to_string().chars().map(|c| c.to_digit(10).and_then(|d| char::from_u32(0x0660 + d)).unwrap_or(c)).collect()
@@ -173,5 +220,34 @@ mod tests {
     #[test]
     fn arabic_numbers() {
         assert_eq!(arabic_number(255), "٢٥٥");
+    }
+
+    #[test]
+    fn a_words_signs_are_found_in_its_text() {
+        let signs = |text: &str| {
+            let m = Marks::of(text);
+            let found: String = text.char_indices().filter(|(at, _)| m.covers(*at)).map(|(_, c)| c).collect();
+            (found, m.closing_count, m.opening > 0)
+        };
+        // Pause marks as the mushaf writes them (QPC text of 2:2:4, 2:26:28, 36:52:6 with sīn then qalā, 17:105:4).
+        assert_eq!(signs("رَيۡبَۛ"), ("ۛ".into(), 1, false));
+        assert_eq!(signs("مَثَلٗاۘ"), ("ۘ".into(), 1, false));
+        assert_eq!(signs("مَّرۡقَدِنَاۜۗ"), ("ۜۗ".into(), 2, false));
+        assert_eq!(signs("نَزَلَۗ"), ("ۗ".into(), 1, false));
+        // As the Uthmani text writes them, after a space (2:5:5).
+        assert_eq!(signs("رَّبِّهِمْ ۖ"), ("ۖ".into(), 1, false));
+        // The rub el hizb before a word (2:26:1), the sajdah sign after one, with or without a space (17:109:5, 7:206:11),
+        // and both with a pause mark (22:60:1).
+        assert_eq!(signs("۞ إِنَّ"), ("۞".into(), 0, true));
+        assert_eq!(signs("خُشُوعٗا ۩"), ("۩".into(), 1, false));
+        assert_eq!(signs("يَسۡجُدُونَۤ۩"), ("۩".into(), 1, false));
+        assert_eq!(signs("۞ ذَٰلِكَۖ"), ("۞ۖ".into(), 1, true));
+        // A sīn over a ṣād inside a word is part of it (2:245:14); other small marks are the word's own.
+        assert_eq!(signs("وَيَبۡصُۜطُ"), (String::new(), 0, false));
+        assert_eq!(signs("هُدٗى"), (String::new(), 0, false));
+        assert_eq!(signs("مِنۢ"), (String::new(), 0, false));
+        assert!(!Marks::of("").any() && !Marks::of("٢").any() && Marks::of("ۚ").any());
+        // A word that is nothing but its pause mark (40:77:5's glyph): the whole of it.
+        assert_eq!(signs("ۚ"), ("ۚ".into(), 1, false));
     }
 }

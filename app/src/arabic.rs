@@ -91,6 +91,16 @@ impl ArabicFont {
         self.shape_and_draw(digits, px_per_em, &[off], Some(harfrust::Direction::LeftToRight))
     }
 
+    /// Only the signs of a word's text (`quran_core::glyph::Marks`: its rub el hizb, pause marks, sajdah sign), where
+    /// they are when the whole text is drawn: the same pen, the same advance. `None` if it has none.
+    pub fn render_signs(&self, text: &str, px_per_em: f32) -> Option<TextMask> {
+        let marks = quran_core::glyph::Marks::of(text);
+        if !marks.any() {
+            return None;
+        }
+        self.shape_and_draw_some(text, px_per_em, &[], None, Some(&|at| marks.covers(at)))
+    }
+
     fn draw(&self, text: &str, px_per_em: f32, features: &[harfrust::Feature]) -> Option<TextMask> {
         self.shape_and_draw(text, px_per_em, features, None)
     }
@@ -102,12 +112,28 @@ impl ArabicFont {
         features: &[harfrust::Feature],
         direction: Option<harfrust::Direction>,
     ) -> Option<TextMask> {
+        self.shape_and_draw_some(text, px_per_em, features, direction, None)
+    }
+
+    /// Shape `text` and draw it, or only the glyphs of the characters `only` takes (by their byte in the text).
+    fn shape_and_draw_some(
+        &self,
+        text: &str,
+        px_per_em: f32,
+        features: &[harfrust::Feature],
+        direction: Option<harfrust::Direction>,
+        only: Option<&dyn Fn(usize) -> bool>,
+    ) -> Option<TextMask> {
         let font = FontRef::new(&self.data).ok()?;
         let mut buffer = UnicodeBuffer::new();
         buffer.push_str(text);
         buffer.guess_segment_properties();
         if let Some(direction) = direction {
             buffer.set_direction(direction);
+        }
+        if only.is_some() {
+            // Each character its own cluster, so a mark's glyph says which character it draws.
+            buffer.set_cluster_level(harfrust::BufferClusterLevel::Characters);
         }
         let shaped = self.shaper.shaper(&font).build().shape(buffer, harfrust::ShapeOptions::new().features(features));
 
@@ -118,7 +144,9 @@ impl ArabicFont {
         let mut x = 0.0f32;
         for (info, pos) in shaped.glyph_infos().iter().zip(shaped.glyph_positions()) {
             pen.origin = Vector::new(x + pos.x_offset as f32 * scale, -(pos.y_offset as f32) * scale);
-            if let Some(glyph) = outlines.get(skrifa::GlyphId::new(info.glyph_id)) {
+            if only.is_none_or(|only| only(info.cluster as usize))
+                && let Some(glyph) = outlines.get(skrifa::GlyphId::new(info.glyph_id))
+            {
                 let _ = glyph.draw(settings(), &mut pen);
             }
             x += pos.x_advance as f32 * scale;

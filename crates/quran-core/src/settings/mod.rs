@@ -456,8 +456,9 @@ pub struct Settings {
     /// The offer to save the Quran for reading offline has been answered, or saving was started: it is made once
     /// (settings of before have not seen it).
     pub offline_offered: bool,
-    /// Memorizing (hifz): the mushaf's words are hidden but for the ayahs' ends, and so are the meanings and
-    /// translations; a word clicked shows until it is clicked again.
+    /// Memorizing (hifz): the mushaf's words are hidden but for the ayahs' ends and the signs between their words
+    /// (pause marks, rub el hizb, sajdah), and so are the meanings and translations, each keeping its place; a word
+    /// clicked shows until it is clicked again. Only what is drawn changes: not what is asked of the API, nor the layout.
     pub hifz: bool,
 }
 
@@ -504,9 +505,9 @@ impl Settings {
         }
     }
 
-    /// Whether each page's verse translations show under it (not while memorizing).
+    /// Whether each page's verse translations are laid out under it (memorizing hides them in their place).
     pub fn page_translations(&self) -> bool {
-        self.show_page_translation && !self.hifz
+        self.show_page_translation
     }
 
     /// Font base URLs to try, in order (custom first).
@@ -682,6 +683,15 @@ mod tests {
         assert_eq!(q.fields, ["text_uthmani", "qpc_uthmani_hafs"]);
         s.mushaf_font = MushafFont::MadaniV2;
         assert_eq!(s.verse_query().mushaf, Some(1));
+    }
+
+    #[test]
+    fn memorizing_changes_neither_the_query_nor_the_layout() {
+        for s in [Settings::default(), Settings { show_page_translation: true, ..Settings::default() }] {
+            let memorizing = Settings { hifz: true, ..s.clone() };
+            assert_eq!(memorizing.verse_query(), s.verse_query());
+            assert_eq!(memorizing.page_translations(), s.page_translations());
+        }
     }
 
     #[test]

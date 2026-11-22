@@ -39,6 +39,9 @@ pub enum TextFont {
     Fallback,
     /// The same face, as a plain number.
     Number,
+    /// The same face, only the signs of a word's text (its rub el hizb, pause marks, sajdah sign), where they are
+    /// when the whole word is drawn.
+    Signs,
     /// The surah banner's frame and name ornaments (ligatures).
     Frame,
     Names,
@@ -139,6 +142,7 @@ fn draw(job: &Job, request: &Request) -> (Option<Pending>, bool) {
         let mask = match text.font {
             TextFont::Fallback => job.fallback.as_ref()?.render(&text.text, px),
             TextFont::Number => job.fallback.as_ref()?.render_number(&text.text, px),
+            TextFont::Signs => job.fallback.as_ref()?.render_signs(&text.text, px),
             TextFont::Frame => job.ornaments.as_ref()?.frame.render_ligatures(&text.text, px),
             TextFont::Names => job.ornaments.as_ref()?.names.render_ligatures(&text.text, px),
         }?;

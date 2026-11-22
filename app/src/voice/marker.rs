@@ -364,7 +364,9 @@ impl Marker {
             let first = if h.loc.1 == 0 { h.word + 5 - u32::from(h.loc.2) } else { h.word + 1 - u32::from(h.loc.2) };
             self.pages.arrive(first, (h.loc.0, 1, 1));
         } else if params.tuned && h.loc.0 > 0 && reading(&h.state).is_some() && !self.hold.take(position(&h), self.follower.target(), now) {
-            // A jump ahead, held: the pointer stays, and the place it shows stays the one heard before.
+            // A jump ahead, held: the pointer stays, and the place it shows stays the one heard before (its word was
+            // heard, though: not a word gone past unread).
+            self.skipped.held_back(&h, now);
             return None;
         }
         // (A jump the hold lets go arrived where it was first heard; the pace is the one the reading had come at.)
@@ -406,8 +408,9 @@ impl Marker {
 
     /// A new plan while the place shown stays (the reader got further within it), `t` s of audio heard.
     pub fn replan(&mut self, plan: &Plan, t: f32, now: f64, params: &Params) {
-        // (A plan on a Bismillah line would be in the listener's indices of the basmala.)
-        let Some(h) = self.last.as_ref().filter(|h| params.plan && h.loc.0 > 0 && h.loc.1 > 0) else { return };
+        // (A plan on a Bismillah line would be in the listener's indices of the basmala; one while a jump is held is
+        // the held place's, which the pointer does not go to before the hold lets it.)
+        let Some(h) = self.last.as_ref().filter(|h| params.plan && h.loc.0 > 0 && h.loc.1 > 0 && !(params.tuned && self.hold.holding())) else { return };
         if let Some(r) = reading(&h.state)
             && self.follower.update_plan(plan, r, h.conf, h.speed, t, now, params) == Jump::Respawn
         {

@@ -28,6 +28,8 @@ pub struct WordCell {
     pub text: Option<String>,
     /// `text` is in the QPC Hafs encoding (drawn with the Hafs fallback font).
     pub qpc: bool,
+    /// Where `text` has the mushaf's signs besides the letters (the rub el hizb, pause marks, the sajdah sign).
+    pub marks: glyph::Marks,
     pub translation: Option<String>,
     pub transliteration: Option<String>,
     /// On a verse's first cell: the verse's word count (the cell is the verse's anchor).
@@ -170,10 +172,29 @@ fn non_empty(t: Option<&crate::api::WordText>) -> Option<String> {
 
 /// The verse's QPC Hafs text split into one token per word (the end marker's
 /// token is the ayah number), if it lines up with the word list. The API only
-/// has this text per verse.
+/// has this text per verse. A rub el hizb ۞ or a sajdah sign ۩ standing on its
+/// own goes with its word (the one after it, the one before it), as in the
+/// words' own text.
 fn qpc_tokens(v: &Verse) -> Option<Vec<&str>> {
-    let tokens: Vec<&str> = v.qpc_uthmani_hafs.as_deref()?.split_whitespace().collect();
-    (tokens.len() == v.words.len()).then_some(tokens)
+    let text = v.qpc_uthmani_hafs.as_deref()?;
+    let mut spans: Vec<(usize, usize)> = Vec::with_capacity(v.words.len());
+    let mut opened: Option<usize> = None;
+    for token in text.split_whitespace() {
+        let start = token.as_ptr().addr() - text.as_ptr().addr();
+        let end = start + token.len();
+        let lone = |c: char| token.chars().eq([c]);
+        if let Some(from) = opened.take() {
+            spans.push((from, end));
+        } else if lone(glyph::RUB_EL_HIZB) {
+            opened = Some(start);
+        } else if let Some(last) = spans.last_mut().filter(|_| lone(glyph::SAJDAH)) {
+            last.1 = end;
+        } else {
+            spans.push((start, end));
+        }
+    }
+    spans.extend(opened.map(|from| (from, text.len())));
+    (spans.len() == v.words.len()).then(|| spans.into_iter().map(|(from, to)| &text[from..to]).collect())
 }
 
 fn word_cell(v: &Verse, w: &Word, layout: Option<(u16, u16)>, qpc: Option<&str>) -> WordCell {
@@ -183,6 +204,10 @@ fn word_cell(v: &Verse, w: &Word, layout: Option<(u16, u16)>, qpc: Option<&str>)
         (None, None) if w.is_end_marker() => (Some(glyph::arabic_number(v.verse_number)), false),
         (None, None) => (None, false),
     };
+    let marks = match (&text, w.is_end_marker()) {
+        (Some(t), false) => glyph::Marks::of(t),
+        _ => glyph::Marks::default(),
+    };
     WordCell {
         location: format!("{}:{}", v.verse_key, w.position),
         verse_key: v.verse_key.clone(),
@@ -190,6 +215,7 @@ fn word_cell(v: &Verse, w: &Word, layout: Option<(u16, u16)>, qpc: Option<&str>)
         page: layout.map(|(p, _)| p),
         line: layout.map(|(_, l)| l),
         is_end: w.is_end_marker(),
+        marks,
         // Glyphs only with a known layout page, and only if the glyph's font page
         // (`v2_page`) is that resolved page: the page's font draws them.
         glyph: layout.and_then(|(page, _)| match w.v2_page {
@@ -234,6 +260,7 @@ fn flow_cells(v: &Verse, reason: FlowReason) -> Vec<WordCell> {
                 .map(|(i, t)| WordCell {
                     location: format!("{}:{}", v.verse_key, i + 1),
                     text: Some(t.to_string()),
+                    marks: glyph::Marks::of(t),
                     ..blank.clone()
                 })
                 .collect();
@@ -601,6 +628,30 @@ mod tests {
         assert_eq!((cells[0].text.as_deref(), cells[0].qpc), (Some("٤"), false));
         let Item::Line { cells, .. } = &l.pages[0].items[0] else { panic!() };
         assert_eq!((cells[0].text.as_deref(), cells[0].qpc), (Some("u"), false));
+    }
+
+    #[test]
+    fn a_rub_el_hizb_or_sajdah_sign_goes_with_its_word_and_signs_are_found() {
+        let texts = |v: &Verse| {
+            let l = build_layout(std::slice::from_ref(v), Trim::default());
+            let lines = l.pages[0].items.iter().filter_map(|i| if let Item::Line { cells, .. } = i { Some(cells) } else { None });
+            lines.flatten().map(|c| (c.text.clone().unwrap(), c.qpc, c.marks.opening > 0, c.marks.closing_count)).collect::<Vec<_>>()
+        };
+        // 2:26 opens a quarter: its ۞ stands alone in the verse's text, and is its first word's (as in the word's own text).
+        let mut v = verse("2:26", &[(5, 4), (5, 4), (5, 4), (5, 4)]);
+        v.qpc_uthmani_hafs = Some("۞ إِنَّ ٱللَّهَ فَوۡقَهَاۚ\u{a0}٢٦".into());
+        let t = |s: &str, opens, closes| (s.to_string(), true, opens, closes);
+        assert_eq!(texts(&v), [t("۞ إِنَّ", true, 0), t("ٱللَّهَ", false, 0), t("فَوۡقَهَاۚ", false, 1), t("٢٦", false, 0)]);
+        // A sajdah sign on its own goes with the word before it.
+        let mut v = verse("17:109", &[(293, 6), (293, 6), (293, 6)]);
+        v.qpc_uthmani_hafs = Some("وَيَزِيدُهُمۡ خُشُوعٗا ۩\u{a0}١٠٩".into());
+        assert_eq!(texts(&v), [t("وَيَزِيدُهُمۡ", false, 0), t("خُشُوعٗا ۩", false, 1), t("١٠٩", false, 0)]);
+        // Still a token too many: the words' own text, its signs found there.
+        v.qpc_uthmani_hafs = Some("وَيَزِيدُ هُمۡ خُشُوعٗا ۩\u{a0}١٠٩".into());
+        for (w, text) in v.words.iter_mut().zip(["وَيَزِيدُهُمْ", "خُشُوعًا ۩", "١٠٩"]) {
+            (w.qpc_uthmani_hafs, w.text_uthmani) = (None, Some(text.into()));
+        }
+        assert_eq!(texts(&v)[1], ("خُشُوعًا ۩".to_string(), false, false, 1));
     }
 
     #[test]

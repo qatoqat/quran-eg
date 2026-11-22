@@ -103,7 +103,11 @@ pub fn show(ui: &mut Ui, env: &mut Env<'_>, search: &mut SearchBox, input: Heade
     if kit::icon_button(&mut right, colors, Icon::Search, search.open).clicked() {
         search.toggle();
     }
-    let tip = if input.hifz { "Show the words again" } else { "Memorize: hide the words but for the ayahs' ends (click a word to see it)" };
+    let tip = if input.hifz {
+        "Show the words again"
+    } else {
+        "Memorize: hide the words but for the ayahs' ends and the pause marks (click a word to see it)"
+    };
     if kit::icon_button(&mut right, colors, Icon::Hifz, input.hifz).on_hover_text(tip).clicked() {
         action = Some(HeaderAction::ToggleHifz);
     }

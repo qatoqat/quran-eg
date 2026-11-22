@@ -4,7 +4,12 @@
 //! fewest set or more and the reader could not have read them since: at their pace from any report of the last few
 //! seconds (or the furthest word's first, while the reading stays there), silences left out, and two words more.
 //! The listener lags and catches up (a word held for over a second, then two or three at once: about once a minute in
-//! the user's sessions), and those are not skips. A later report on a marked word takes its mark away, with the words
+//! the user's sessions), and those are not skips; nor are words a report the hold kept back was on (the listener heard
+//! the reader there). Gone back behind the furthest word and read on a few words from there, the reader is reading
+//! again, and a skip in that reading is one too (the user's page 7: 2:40 read again, then on with 2:42): moves are
+//! measured from that reading's furthest word, but a move on to where the reading had got to before (or two words short
+//! of it) or past it from there: the reader goes on from where they were, or the listener, back for a moment (mostly a
+//! report or two), comes back to them. A later report on a marked word takes its mark away, with the words
 //! since the report before when that was a step of reading, and a step back onto a run of marks a word or two in takes
 //! the run's first words too (the listener finds the place a little late): reading them clears them. They are drawn in
 //! the accuracy range's shapes under the pointer, and go when listening stops or the reader dismisses them.
@@ -34,6 +39,10 @@ const LAG: f32 = 2.0;
 const QUIET: f64 = 0.5;
 /// A step back onto a run of marks this many words in, or fewer, takes the run's first words too.
 const BACK_IN: u32 = 2;
+/// Words a reading gone back behind the furthest word reads on from the furthest back it went that make it a reading
+/// again, and the words short of where the reading had got to before that a move on reaches it.
+const AGAIN: u32 = 3;
+const NEAR: u32 = 2;
 
 /// A report as the marks go by it: its word (index in the whole Quran, and place), its position (the index plus the
 /// share read) and the clock time it came at.
@@ -62,11 +71,17 @@ pub struct Skipped {
     /// The first report on the furthest word reached, and whether the reading has stayed there since.
     furthest: Option<At>,
     stayed: bool,
+    /// Gone back behind it, the furthest back the reading went since; reading again, the furthest word it had reached
+    /// before, while the reading is behind it.
+    back: Option<At>,
+    before: Option<At>,
     /// The last report followed, and those of the last `WINDOW` s.
     last: Option<At>,
     recent: VecDeque<At>,
     /// Where a held jump was first heard that the hold let go on an unsure report (the next followed one arrives there).
     arrived: Option<At>,
+    /// The reports of the last `WINDOW` s the hold kept back: the words they are on were heard, followed or not.
+    held_back: VecDeque<At>,
     /// The silences of late (clock time from, to), and since when the reader has been stopped where the last report is
     /// (Paused) and the voice quiet.
     silences: VecDeque<(f64, f64)>,
@@ -133,6 +148,14 @@ impl Skipped {
         self.read(arrived, at, pace, min.unwrap_or(1));
         self.skip(arrived, pace, min);
         self.went(arrived, at, now);
+    }
+
+    /// A report the hold kept back at clock time `now`: no move, but its word was heard (a move on past it is measured
+    /// from there).
+    pub fn held_back(&mut self, h: &Heard, now: f64) {
+        if h.loc.0 > 0 && h.loc.1 > 0 {
+            self.held_back.push_back(At { i: h.word, loc: h.loc, pos: position(h), time: now });
+        }
     }
 
     /// The voice came or went (the link's presence) at clock time `now`: back, the reader sounds again (a stop the
@@ -230,7 +253,7 @@ impl Skipped {
         let mut from = arrived.i;
         match self.last {
             Some(last) if last.i < arrived.i => {
-                if arrived.i - last.i - 1 < min || arrived.i as f32 <= self.reach(arrived.time, pace) {
+                if arrived.i - last.i - 1 < min || arrived.i as f32 <= self.reach(arrived.time, pace, arrived.i) {
                     from = last.i + 1;
                 }
             }
@@ -246,14 +269,18 @@ impl Skipped {
         self.marks.retain(|_, i| *i < from || *i > at.i);
     }
 
-    /// Marks the words between the furthest reached and where the reading arrived: `min` or more (`None`: none are
-    /// marked), within a page, further than the reader could have read since, and not a move from a view they chose.
+    /// Marks the words between the furthest reached (where the reading had got to before it went back, for a move on to
+    /// there or past it) and where the reading arrived: `min` or more (`None`: none are marked), within a page, further
+    /// than the reader could have read since, and not a move from a view they chose.
     fn skip(&mut self, arrived: At, pace: f32, min: Option<u32>) {
-        let Some(f) = self.furthest.filter(|f| arrived.i > f.i) else { return };
+        let from = self.before.filter(|b| arrived.i + NEAR >= b.i).or(self.furthest);
+        let Some(f) = from.filter(|f| arrived.i > f.i) else { return };
         let chosen = std::mem::take(&mut self.chosen);
         let Some(min) = min else { return };
+        // (From the furthest word short of the arrival a report the hold kept back was on.)
+        let f = self.held_back.iter().filter(|k| k.i > f.i && k.i < arrived.i).max_by_key(|k| k.i).map_or(f, |k| *k);
         let between = arrived.i - f.i - 1;
-        if chosen || between < min || arrived.i - f.i > PAGE as u32 || arrived.i as f32 <= self.reach(arrived.time, pace) {
+        if chosen || between < min || arrived.i - f.i > PAGE as u32 || arrived.i as f32 <= self.reach(arrived.time, pace, arrived.i) {
             return;
         }
         // Their places, from the furthest word's on: marked only when they come out at the arrival's.
@@ -269,17 +296,29 @@ impl Skipped {
     }
 
     /// The reading arrived at `arrived` and is at `at` (clock time `now`): the furthest word and the last report move on;
-    /// gone a page or more away (navigation), the furthest word is where it went.
+    /// gone a page or more away (navigation), the furthest word is where it went; gone back behind it and read on
+    /// `AGAIN` words from the furthest back since, it is where this reading again is.
     fn went(&mut self, arrived: At, at: At, now: f64) {
         let page = PAGE as u32;
         let navigated = self.last.is_some_and(|l| arrived.i + page < l.i) || self.furthest.is_some_and(|f| arrived.i > f.i + page);
         match self.furthest {
-            Some(f) if !navigated && at.i <= f.i => self.stayed &= at.i + 1 >= f.i,
+            // At the furthest word or the one before it.
+            Some(f) if !navigated && at.i <= f.i && at.i + 1 >= f.i => self.back = None,
+            Some(f) if !navigated && at.i <= f.i => {
+                let back = self.back.filter(|b| b.i <= arrived.i).unwrap_or(arrived);
+                (self.stayed, self.back) = (false, Some(back));
+                if at.i >= back.i + AGAIN {
+                    self.before = self.before.filter(|b| b.i > f.i).or(Some(f));
+                    (self.furthest, self.stayed, self.back) = (Some(at), true, None);
+                }
+            }
             _ => {
-                (self.furthest, self.stayed) = (Some(if arrived.i == at.i { arrived } else { at }), true);
+                (self.furthest, self.stayed, self.back) = (Some(if arrived.i == at.i { arrived } else { at }), true, None);
                 self.chosen &= !navigated;
+                self.before = self.before.filter(|_| !navigated);
             }
         }
+        self.before = self.before.filter(|b| at.i < b.i);
         for a in [arrived, at] {
             if self.recent.back() != Some(&a) {
                 self.recent.push_back(a);
@@ -288,6 +327,9 @@ impl Skipped {
         while self.recent.front().is_some_and(|r| now - r.time > WINDOW) {
             self.recent.pop_front();
         }
+        while self.held_back.front().is_some_and(|r| now - r.time > WINDOW) {
+            self.held_back.pop_front();
+        }
         let kept = self.furthest.filter(|_| self.stayed).map_or(now - WINDOW, |f| f.time.min(now - WINDOW));
         while self.silences.front().is_some_and(|s| s.1 < kept) {
             self.silences.pop_front();
@@ -295,12 +337,12 @@ impl Skipped {
         self.last = Some(at);
     }
 
-    /// The furthest the reader could have read to by clock time `to` at `pace`: from any report of the last `WINDOW` s
-    /// (the last one, if none), or the furthest word's first while the reading stays there, their silences left out,
-    /// and `LAG` words more.
-    fn reach(&self, to: f64, pace: f32) -> f32 {
+    /// The furthest the reader could have read to by clock time `to` at `pace`, for a move to word `on`: from any
+    /// report of the last `WINDOW` s (the last one, if none; those the hold kept back short of `on` too), or the
+    /// furthest word's first while the reading stays there, their silences left out, and `LAG` words more.
+    fn reach(&self, to: f64, pace: f32, on: u32) -> f32 {
         let pace = pace.max(LEAST_PACE);
-        let recent = self.recent.iter().filter(|a| to - a.time <= WINDOW);
+        let recent = self.recent.iter().chain(self.held_back.iter().filter(|a| a.i < on)).filter(|a| to - a.time <= WINDOW);
         let anchors = recent.chain(self.last.iter()).chain(self.furthest.iter().filter(|_| self.stayed));
         anchors.map(|a| a.pos + pace * self.sounding(a.time.min(to), to)).fold(f32::NEG_INFINITY, f32::max) + LAG
     }
