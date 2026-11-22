@@ -145,6 +145,8 @@ pub struct Canvas<'a> {
     pub vivid: std::cell::RefCell<Option<Mesh>>,
     /// Every word painted, with its location and box: the voice pointer's map.
     pub slots: std::cell::RefCell<Vec<Slot>>,
+    /// Memorizing: the only words of the ayahs drawn (the rest keep their places, unseen); `None` draws them all.
+    pub shown: Option<&'a std::collections::HashSet<(u16, u16, u16)>>,
 }
 
 /// A word on screen: its location (surah, ayah, word), its box (as tall as its line), the y of its
@@ -204,9 +206,11 @@ impl Canvas<'_> {
                 if let Some(Item::Bismillah { chapter }) = page.items.get(row.item) {
                     self.bismillah_slots(at, words, *chapter, sheet);
                 }
-                let y = at.y + m.line_height() + m.meaning_gap.max(0.0);
-                let meaning = self.painter.layout_job(place::bismillah_job(meaning, m));
-                self.painter.galley(pos2(at.x + m.line_width / 2.0, y), meaning, m.muted);
+                if !m.memorizing {
+                    let y = at.y + m.line_height() + m.meaning_gap.max(0.0);
+                    let meaning = self.painter.layout_job(place::bismillah_job(meaning, m));
+                    self.painter.galley(pos2(at.x + m.line_width / 2.0, y), meaning, m.muted);
+                }
             }
             RowKind::Line { words } => {
                 for word in words {
@@ -248,7 +252,8 @@ impl Canvas<'_> {
     }
 
     /// One word: its sprite (or what stands in for it) centred in its box on
-    /// the line's baseline, and its meaning underneath.
+    /// the line's baseline, and its meaning underneath. Memorizing, an ayah's word not
+    /// clicked to show it is not drawn (its end is, as is the Bismillah line).
     fn word(&self, row: Pos2, word: &Word, page: &PageBlock, sheet: Option<&LoadedSheet>, mesh: Option<&mut Mesh>) {
         let (m, c) = (self.metrics, self.colors);
         let left = row.x + word.x;
@@ -257,7 +262,15 @@ impl Canvas<'_> {
         let baseline = baseline(top, m.em, sheet.and_then(|s| s.metrics));
         let middle = top + m.line_height() / 2.0;
         let sprite = sheet.and_then(|s| s.sprites.get(&word.key));
+        let cell = word.cell.and_then(|(item, index)| match page.items.get(item)? {
+            Item::Line { cells, .. } | Item::Flow { cells, .. } => cells.get(index),
+            _ => None,
+        });
+        // The ayah's words (not its end) are the voice pointer's places.
+        let at = cell.filter(|c| !c.is_end).and_then(|c| location(&c.location));
+        let hidden = at.is_some_and(|at| self.shown.is_some_and(|shown| !shown.contains(&at)));
         match (word.mode, sprite, mesh) {
+            _ if hidden => {}
             (Mode::Glyph, Some(sprite), Some(mesh)) => {
                 self.sprite(mesh, sprite, centre + sprite.advance * m.em / 2.0, baseline, c.fg);
             }
@@ -281,23 +294,14 @@ impl Canvas<'_> {
             // No font yet (or the sprite is on its way): a marked box where the word will be.
             _ => placeholder(self.painter, c, pos2(centre, middle), word.width, m.em),
         }
-        let cell = word.cell.filter(|_| word.meaning.is_some()).and_then(|(item, index)| match page.items.get(item)? {
-            Item::Line { cells, .. } | Item::Flow { cells, .. } => cells.get(index),
-            _ => None,
-        });
         let slot = Rect::from_min_size(pos2(left, top), vec2(word.width, m.line_height()));
-        if let Some((item, index)) = word.cell
-            && let Some(Item::Line { cells, .. } | Item::Flow { cells, .. }) = page.items.get(item)
-            && let Some(at) = cells.get(index).filter(|c| !c.is_end).and_then(|c| location(&c.location))
-        {
+        if let Some(at) = at {
             self.slots.borrow_mut().push((at, slot, baseline, m.em));
         }
         // "On hover": the hovered word is tinted and says what it means in a tooltip.
         if m.tooltip
             && self.hover.is_some_and(|p| slot.contains(p))
-            && let Some((item, index)) = word.cell
-            && let Some(Item::Line { cells, .. } | Item::Flow { cells, .. }) = page.items.get(item)
-            && let Some(cell) = cells.get(index).filter(|c| !c.is_end)
+            && let Some(cell) = cell.filter(|c| !c.is_end)
         {
             let (transliteration, translation) = place::word_notes(cell, m);
             let lines: Vec<(String, bool)> =
@@ -307,7 +311,7 @@ impl Canvas<'_> {
                 *self.tip.borrow_mut() = Some((slot, lines));
             }
         }
-        if let Some(job) = cell.and_then(|c| place::meaning_job(c, m)) {
+        if let Some(job) = cell.filter(|_| word.meaning.is_some()).and_then(|c| place::meaning_job(c, m)) {
             let meaning = self.painter.layout_job(job);
             self.painter.galley(pos2(centre, top + m.line_height() + m.meaning_gap), meaning, m.muted);
         }

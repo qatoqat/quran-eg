@@ -78,7 +78,14 @@ impl Bench {
     /// Run `count` frames of a 1000 × 800 window.
     fn frames(&mut self, count: usize) {
         for _ in 0..count {
-            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))), ..Default::default() };
+            self.frame(Vec::new());
+        }
+    }
+
+    /// One frame with these input events; what it painted.
+    fn frame(&mut self, events: Vec<egui::Event>) -> egui::FullOutput {
+        {
+            let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))), events, ..Default::default() };
             let mut output = self.ctx.run_ui(input, |ui| {
                 self.fonts.poll();
                 let mut env = Env {
@@ -95,7 +102,16 @@ impl Bench {
             });
             // No renderer takes the textures here.
             output.textures_delta.clear();
+            output
         }
+    }
+
+    /// A click at `at` (pressed one frame, let go the next).
+    fn click(&mut self, at: Pos2) {
+        let button = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() };
+        self.frame(vec![egui::Event::PointerMoved(at), button(true)]);
+        self.frame(vec![button(false)]);
+        self.frames(2);
     }
 
     fn placed(&self) -> Vec<usize> {
@@ -227,4 +243,45 @@ fn a_bismillah_line_is_four_places_for_the_voice_pointer_and_its_surah_head_can_
     bench.reader.go_to(Some(WordRef { chapter: 2, verse: 1, word: 1 }));
     bench.frames(3);
     assert!(bench.reader.words.iter().find(|w| w.0 == (2, 0, 1)).is_none_or(|w| w.1.top() < 0.0));
+}
+
+#[test]
+fn memorizing_hides_the_ayahs_words_but_keeps_their_places_and_a_click_shows_one() {
+    let mut bench = Bench::new(sixty_verses());
+    // Each word without a font is a marked box.
+    let boxes = |out: &egui::FullOutput| out.shapes.iter().filter(|s| matches!(s.shape, egui::Shape::Rect(_))).count();
+    bench.frames(3);
+    let places: Vec<_> = bench.reader.words.iter().map(|w| w.0).collect();
+    bench.settings.hifz = true;
+    bench.frames(3);
+    let hidden = boxes(&bench.frame(Vec::new()));
+    // The voice pointer's places stay (without the meanings the lines move up, and more come into view).
+    let memorizing: Vec<_> = bench.reader.words.iter().map(|w| w.0).collect();
+    assert!(places.iter().all(|p| memorizing.contains(p)) && memorizing.len() > places.len());
+    // Each word of an ayah is a box not drawn (its end is drawn, as is the Bismillah line): all shown, all are there.
+    let words: Vec<_> = memorizing.iter().copied().filter(|w| w.1 > 0).collect();
+    bench.reader.revealed.extend(words.iter().copied());
+    let all = boxes(&bench.frame(Vec::new()));
+    assert!(words.len() > 20 && all - hidden == words.len(), "{all} boxes, {hidden} memorizing, {} words", words.len());
+    bench.reader.revealed.clear();
+    // A word clicked shows; clicked again, it hides.
+    bench.frames(1);
+    let word = *bench.reader.words.iter().find(|w| w.0 == (2, 2, 2)).expect("2:2:2 on screen");
+    bench.click(word.1.center());
+    assert!(bench.reader.revealed.contains(&(2, 2, 2)));
+    assert_eq!(boxes(&bench.frame(Vec::new())), hidden + 1);
+    bench.click(word.1.center());
+    assert!(bench.reader.revealed.is_empty());
+    assert_eq!(boxes(&bench.frame(Vec::new())), hidden);
+    // No meaning anywhere, the Bismillah line's neither (its row is a line and its space).
+    let m = bench.reader.metrics_now(&bench.settings, &bench.colors);
+    assert!(!m.meanings && !m.translation && !m.tooltip && m.memorizing);
+    let bismillah = &bench.reader.blocks[0].placed.as_ref().unwrap().rows[1];
+    assert!(matches!(bismillah.kind, super::place::RowKind::Bismillah { .. }) && (bismillah.height - m.line_height() - m.line_gap).abs() < 0.01);
+    // Memorizing ends: every word is drawn again, and the words clicked are forgotten.
+    bench.click(word.1.center());
+    bench.settings.hifz = false;
+    bench.frames(3);
+    assert!(bench.reader.revealed.is_empty());
+    assert_eq!(bench.reader.words.iter().map(|w| w.0).collect::<Vec<_>>(), places);
 }

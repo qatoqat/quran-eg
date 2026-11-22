@@ -207,6 +207,20 @@ pub enum Icon {
     Record,
     /// Following the recitation with the voice pointer: a microphone.
     Listen(Mic),
+    /// Memorizing: three lines of text, the middle one ending at an ayah's mark; while on, the words are dashes and the
+    /// mark stays (as the mode draws the page).
+    Hifz,
+    /// Replaying the last recording with the voice pointer.
+    Replay(Play),
+}
+
+/// The Replay button: a triangle to play; a spinner on the rim while its listener starts; a square to stop.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Play {
+    Idle,
+    /// The spinner this far (0..1) through its turn.
+    Starting(f32),
+    Playing,
 }
 
 /// The Listen button's microphone.
@@ -271,9 +285,40 @@ pub fn icon_button(ui: &mut Ui, colors: &Colors, icon: Icon, on: bool) -> Respon
                 }
             }
             Icon::Listen(mic) => microphone(painter, colors, c, rect.width() / 2.0, mic, stroke),
+            Icon::Hifz => {
+                // Each line from the right to where it ends (the middle one at the mark, the last one short).
+                for (y, left) in [(-5.0, -8.0), (0.0, -3.6), (5.0, -2.0)] {
+                    if on {
+                        let mut x = 8.0;
+                        while x - 2.4 >= left - 0.01 {
+                            painter.line_segment([c + vec2(x, y), c + vec2(x - 2.4, y)], stroke);
+                            x -= 4.0;
+                        }
+                    } else {
+                        painter.line_segment([c + vec2(left, y), c + vec2(8.0, y)], stroke);
+                    }
+                }
+                painter.circle_stroke(c + vec2(-6.4, 0.0), 2.0, Stroke::new(1.4, ink));
+            }
+            Icon::Replay(Play::Playing) => {
+                painter.rect_filled(Rect::from_center_size(c, Vec2::splat(9.0)), CornerRadius::same(2), ink);
+            }
+            Icon::Replay(play) => {
+                painter.add(Shape::closed_line(vec![c + vec2(-3.5, -5.5), c + vec2(5.5, 0.0), c + vec2(-3.5, 5.5)], stroke));
+                if let Play::Starting(turn) = play {
+                    spinner(painter, colors, c, rect.width() / 2.0, turn);
+                }
+            }
         }
     }
     response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// A quarter of the rim of a disc (centre `c`, radius `r`), just inside it, `turn` (0..1) through its turn clockwise.
+fn spinner(painter: &Painter, colors: &Colors, c: Pos2, r: f32, turn: f32) {
+    let start = std::f32::consts::TAU * turn;
+    let arc = (0..=12).map(|k| c + (r - 1.1) * Vec2::angled(start + std::f32::consts::FRAC_PI_2 * k as f32 / 12.0)).collect();
+    painter.add(Shape::line(arc, Stroke::new(2.2, colors.accent)));
 }
 
 /// A capsule on a stand, with the cradle around its lower half: filled while listening, over the
@@ -299,12 +344,7 @@ fn microphone(painter: &Painter, colors: &Colors, c: Pos2, r: f32, mic: Mic, str
     painter.add(Shape::line(cradle, stroke));
     painter.line_segment([c + vec2(0.0, 5.0), c + vec2(0.0, 8.0)], stroke);
     match mic {
-        Mic::Connecting(turn) => {
-            // A quarter of the rim, just inside it, turning clockwise.
-            let start = std::f32::consts::TAU * turn;
-            let arc = (0..=12).map(|k| c + (r - 1.1) * Vec2::angled(start + std::f32::consts::FRAC_PI_2 * k as f32 / 12.0)).collect();
-            painter.add(Shape::line(arc, Stroke::new(2.2, colors.accent)));
-        }
+        Mic::Connecting(turn) => spinner(painter, colors, c, r, turn),
         Mic::Trouble => {
             // Cut out of the glyph under it (in the disc's colour on the header), then drawn.
             let ends = [c + vec2(-7.0, -8.0), c + vec2(7.0, 8.0)];

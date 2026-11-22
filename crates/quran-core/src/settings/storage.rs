@@ -108,6 +108,7 @@ pub fn normalize(s: &mut Settings) {
     voice.ring = voice.ring.clamp(1, 40);
     voice.lift = voice.lift.min(10);
     voice.far_wait_ms = voice.far_wait_ms.min(20000);
+    voice.model = sanitize_model(&voice.model).unwrap_or_default();
     let dot = &mut voice.pointer;
     dot.size = dot.size.clamp(2, 20);
     dot.opacity = dot.opacity.clamp(5, 100);
@@ -139,6 +140,14 @@ pub fn normalize(s: &mut Settings) {
     let mut seen = std::collections::HashSet::new();
     s.translations.retain(|id| seen.insert(*id));
     s.font_base_url = sanitize_font_base_url(&s.font_base_url).unwrap_or_default();
+}
+
+/// A model's name as the settings keep it: a folder right inside the listener's `models/` (no path), trimmed; `None`
+/// for anything else, which is the listener's own `model/`.
+pub fn sanitize_model(raw: &str) -> Option<String> {
+    let name = raw.trim();
+    let bad = |c: char| c.is_control() || c == '/' || c == '\\';
+    (!name.is_empty() && name != "." && name != ".." && !name.chars().any(bad)).then(|| name.to_string())
 }
 
 /// Validate a custom font base URL: trimmed, and either an `http(s)://host...`
@@ -442,6 +451,26 @@ mod tests {
         assert_eq!(s.arabic_font_scale, 1);
         assert_eq!(s.translation_font_scale, 10);
         assert_eq!(s.translations, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn the_model_and_memorizing_carry_over_and_default_to_what_was_before() {
+        // Settings of before: the listener's own model/, the words shown.
+        let s = from_json(r#"{"theme":"Dark","voice":{"listener":"/opt/qv"}}"#).unwrap();
+        assert_eq!((s.voice.model.as_str(), s.hifz), ("", false));
+        assert_eq!(crate::settings::model_folder(&s.voice.model), "model");
+        let mut s = Settings { hifz: true, ..Default::default() };
+        s.voice.model = "g-b".into();
+        assert_eq!(from_json(&to_json(&s)), Some(s.clone()));
+        assert_eq!(crate::settings::model_folder(&s.voice.model), "models/g-b");
+        // Only a folder right inside models/.
+        for (raw, kept) in [(" h-a ", "h-a"), ("../model", ""), ("a/b", ""), ("..", ""), (".", ""), ("x\\y", ""), ("p\u{0}", "")] {
+            let json = serde_json::json!({ "voice": { "model": raw } }).to_string();
+            assert_eq!(from_json(&json).unwrap().voice.model, kept, "{raw:?}");
+        }
+        // Memorizing hides the verse translations under the pages.
+        let s = Settings { show_page_translation: true, hifz: true, ..Default::default() };
+        assert!(!s.page_translations() && Settings { hifz: false, ..s }.page_translations());
     }
 
     #[test]

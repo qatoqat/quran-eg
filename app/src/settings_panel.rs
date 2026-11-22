@@ -32,6 +32,9 @@ pub struct Panel {
     /// Why the voice pointer's motion settings do not take with the listener joined (desktop only; `Voice::lacks`).
     #[cfg(not(target_arch = "wasm32"))]
     pub listener: Option<&'static str>,
+    /// The listener followed was started elsewhere, with a model of its own (desktop only).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub joined: bool,
     /// Which listener is installed (desktop only).
     #[cfg(not(target_arch = "wasm32"))]
     installed: crate::voice::Installed,
@@ -51,6 +54,8 @@ impl Panel {
             preview: crate::voice::Preview::default(),
             #[cfg(not(target_arch = "wasm32"))]
             listener: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            joined: false,
             #[cfg(not(target_arch = "wasm32"))]
             installed: crate::voice::Installed::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -196,7 +201,7 @@ impl Panel {
         sizes(ui, colors, settings);
         pointer(ui, colors, settings);
         #[cfg(not(target_arch = "wasm32"))]
-        let voice = Some(voice(ui, colors, settings, self.listener, &mut self.installed));
+        let voice = Some(voice(ui, colors, settings, (self.listener, self.joined), &mut self.installed));
         #[cfg(target_arch = "wasm32")]
         let voice = None;
         // (A browser keeps its own cache.)
@@ -233,6 +238,7 @@ impl Panel {
 
     fn translation_picker(&mut self, ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
         legend(ui, "Translation");
+        memorizing(ui, colors, settings);
         ui.checkbox(&mut settings.show_page_translation, "Show verse translations under each page");
         ui.add_space(4.0);
         let (available, status) = if !self.translations.items.is_empty() {
@@ -379,8 +385,16 @@ fn mushaf_font(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
     }
 }
 
+/// While memorizing, what says what the words mean is hidden whatever is chosen here.
+fn memorizing(ui: &mut Ui, colors: &Colors, settings: &Settings) {
+    if settings.hifz {
+        help(ui, colors, "Hidden while memorizing (the eye in the top bar).");
+    }
+}
+
 fn word_by_word(ui: &mut Ui, colors: &Colors, settings: &mut Settings) {
     legend(ui, "Word by word");
+    memorizing(ui, colors, settings);
     let wbw = &mut settings.word_by_word;
     ui.checkbox(&mut wbw.show_translation, "Show English meaning");
     ui.checkbox(&mut wbw.show_transliteration, "Show transliteration");
@@ -468,7 +482,7 @@ fn glide(ui: &mut Ui, colors: &Colors, title: &str, glide: &mut settings::VoiceG
 /// The voice pointer: its dot, the accuracy range around it and how it moves (desktop only). Returns where it
 /// lies on screen, from under its heading.
 #[cfg(not(target_arch = "wasm32"))]
-fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings, listener: Option<&str>, installed: &mut crate::voice::Installed) -> egui::Rangef {
+fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings, (listener, joined): (Option<&str>, bool), installed: &mut crate::voice::Installed) -> egui::Rangef {
     legend(ui, "Voice pointer");
     let top = ui.cursor().top();
     let voice = &mut settings.voice;
@@ -553,7 +567,11 @@ fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings, listener: Option
     small_caps(ui, colors, "Listener");
     ui.add(egui::TextEdit::singleline(&mut voice.listener).hint_text("~/.local/share/quran-voice").desired_width(f32::INFINITY));
     help(ui, colors, "The folder quran-voice's scripts/install-listener.sh installs to. A listener already running is joined instead.");
-    let (model, qv) = match crate::voice::folder(&voice.listener).map(|dir| installed.lines(ui.ctx(), &dir).cloned()) {
+    if let Some(dir) = crate::voice::folder(&voice.listener) {
+        let models = installed.models(ui.ctx(), &dir).to_vec();
+        models_choice(ui, colors, &mut voice.model, &models, joined);
+    }
+    let (model, qv) = match crate::voice::folder(&voice.listener).map(|dir| installed.lines(ui.ctx(), &dir, &voice.model).cloned()) {
         Some(Some(lines)) => (lines.model, lines.qv),
         Some(None) => ("…".into(), "…".into()),
         None => ("not installed".into(), "not installed".into()),
@@ -566,6 +584,76 @@ fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings, listener: Option
         });
     }
     egui::Rangef::new(top, ui.cursor().top())
+}
+
+/// Which model the listener runs: its own (`model/`, the default) or one of its `models/`, in a capsule while their names
+/// fit in one, else a list; each says what it is on hover (desktop only).
+#[cfg(not(target_arch = "wasm32"))]
+fn models_choice(ui: &mut Ui, colors: &Colors, chosen: &mut String, models: &[crate::voice::Model], joined: bool) {
+    ui.add_space(4.0);
+    small_caps(ui, colors, "Listen with");
+    let on = models.iter().position(|m| m.name == *chosen);
+    let tip = |m: &crate::voice::Model| if m.about.is_empty() { m.title.clone() } else { format!("{}\n{}", m.title, m.about) };
+    let titles: Vec<&str> = models.iter().map(|m| m.title.as_str()).collect();
+    let capsule = kit::Capsule::new(ui.painter(), &titles, 1.0, ui.available_width());
+    let mut clicked = None;
+    if capsule.size().x <= ui.available_width() {
+        let shown = capsule.show(ui, colors, on);
+        for (button, model) in shown.buttons.iter().zip(models) {
+            button.clone().on_hover_text(tip(model));
+        }
+        clicked = shown.clicked();
+    } else {
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing.y = 0.0;
+            for (i, model) in models.iter().enumerate() {
+                if model_row(ui, colors, model, on == Some(i)).on_hover_text(tip(model)).clicked() {
+                    clicked = Some(i);
+                }
+            }
+        });
+    }
+    if let Some(i) = clicked {
+        chosen.clone_from(&models[i].name);
+    }
+    if on.is_none() && !chosen.is_empty() {
+        ui.label(RichText::new(format!("models/{chosen} is not there any more: choose another.")).size(13.6).color(colors.danger));
+    }
+    help(
+        ui,
+        colors,
+        if joined {
+            "The listener followed now was started elsewhere and keeps its own model; this one is used when Listen starts the listener."
+        } else {
+            "Listen starts the listener with it; a listener started here starts again with it at once."
+        },
+    );
+}
+
+/// A model in the list: a radio mark, its name cut to the row, and its folder (desktop only).
+#[cfg(not(target_arch = "wasm32"))]
+fn model_row(ui: &mut Ui, colors: &Colors, model: &crate::voice::Model, on: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 26.0), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        if response.hovered() {
+            painter.rect_filled(rect, egui::CornerRadius::same(6), Colors::faint(colors.accent, 0.1));
+        }
+        let mark = pos2(rect.left() + 10.0, rect.center().y);
+        painter.circle_stroke(mark, 6.5, Stroke::new(1.2, if on { colors.accent } else { colors.muted }));
+        if on {
+            painter.circle_filled(mark, 3.5, colors.accent);
+        }
+        let folder = if model.name.is_empty() { "default" } else { model.name.as_str() };
+        let folder = kit::galley(ui, folder, 12.0, colors.muted, f32::INFINITY);
+        let right = rect.right() - 6.0 - folder.size().x;
+        let mut job = egui::text::LayoutJob::simple_singleline(model.title.clone(), egui::FontId::proportional(14.4), colors.fg);
+        job.wrap = egui::text::TextWrapping { max_width: (right - rect.left() - 34.0).max(20.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+        let name = painter.layout_job(job);
+        painter.galley(pos2(rect.left() + 24.0, rect.center().y - name.size().y / 2.0), name, colors.fg);
+        painter.galley(pos2(right, rect.center().y - folder.size().y / 2.0), folder, colors.muted);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// What was tried and did not pass its tests, off unless chosen (desktop only): tajweed timing from the listener's plans,

@@ -26,7 +26,7 @@ servers and kept in `~/.cache/quran-eg/fonts/`.
 - **Verse translations** under each page (optional), with footnotes and a copy
   action; any of the API's English translations.
 - **Header**, kept to the width of the content: the view's title (`Surah
-  Al-Baqarah`, `Juz 2`, `Page 22`), a search button, a Surah | Juz | Page toggle and
+  Al-Baqarah`, `Juz 2`, `Page 22`), a memorize button, a search button, a Surah | Juz | Page toggle and
   a settings button. The toggle's current button flips between that mode's list and
   reading; the other two open the line being read in their view; each says where it
   leads. There is no list of pages.
@@ -54,6 +54,10 @@ servers and kept in `~/.cache/quran-eg/fonts/`.
   the range, when to fade over instead of moving back or jumping ahead, how far it
   may run ahead at your pace, how long it waits for you while the range reaches back
   to where you are heard).
+- **Memorizing (hifz)**: the header's lines button hides the mushaf's words; the ayahs' ends, the surah
+  banners and the Bismillah line stay, and the meanings and translations go (the Bismillah's too). A word
+  clicked shows until it is clicked again; the words shown are forgotten when memorizing ends or the view
+  changes. The voice pointer follows over the hidden words as over the shown ones. Saved in the settings.
 - **Search**: suggestions under the search box (shortcuts such as `2:255`,
   `juz 30`, `page 3`, `kahf 10`, and matching verses), and a results view with
   highlighted matches and paging.
@@ -86,6 +90,19 @@ folder can be set in the settings). A listener that is already running (`qv list
 started by hand, or for the quran.com extension) is joined instead of starting
 another. `QURAN_EG_LISTEN=1` starts listening when the app opens, and
 `QURAN_EG_VOICE_PORT` picks another port than 8765 (for tests with a stand-in).
+
+Settings › Voice pointer › Listen with picks the model the listener runs: its own `model/` (the default) or a
+folder of its `models/` (`models/<name>/` with `model.bpk`, `config.json`, `norm.json` and a `README.txt` whose
+first line names it), each shown by that name and the next lines on hover. A listener this app started starts
+again at once with the model chosen (`qv listen --run models/<name>`); one started elsewhere keeps its own, and
+the choice applies when Listen starts one.
+
+**Replay** (the triangle left of Record) plays the newest recording through the speakers while the installed
+listener hears the same file at its real pace (`qv listen --file <wav> --cue` on a spare port, its output in
+`replay.log`), so the pointer follows it as it follows you; the view goes to where the recording started.
+Live listening stops meanwhile and comes back after. The listener holds the file until the app says when its
+first sample is heard (the output's latency, from cpal) and starts its feed then. The button stops the replay,
+or calls it off while it starts; Record or Listen end it too. It needs a listener built with `--cue`.
 
 While it listens, the Listen button shows the microphone: its disc fills from the
 bottom as high as the listener hears you (empty below −54 dBFS, full at −6), turns

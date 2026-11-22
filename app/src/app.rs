@@ -64,9 +64,12 @@ pub struct App {
     /// Recording the recitation (header button).
     #[cfg(not(target_arch = "wasm32"))]
     recorder: Option<crate::recorder::Recorder>,
-    /// Following the recitation with the voice pointer (header button).
+    /// Following the recitation with the voice pointer (header button), or a replay of the last recording.
     #[cfg(not(target_arch = "wasm32"))]
     voice: Option<crate::voice::Voice>,
+    /// Replaying the last recording (header button): `voice` follows it meanwhile.
+    #[cfg(not(target_arch = "wasm32"))]
+    replay: Option<crate::voice::Replay>,
     /// The voice pointer turning to another place: a fade, and the view it goes to loading out of sight.
     #[cfg(not(target_arch = "wasm32"))]
     turn: crate::turn::Turn,
@@ -120,6 +123,8 @@ impl App {
             recorder: None,
             #[cfg(not(target_arch = "wasm32"))]
             voice: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            replay: None,
             #[cfg(not(target_arch = "wasm32"))]
             turn: Default::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -300,10 +305,16 @@ impl App {
             recording: self.recorder.as_ref().map(|r| (r.elapsed(), r.start_word().to_string())),
             #[cfg(target_arch = "wasm32")]
             recording: None,
+            // (A replay's voice is not the microphone's.)
             #[cfg(not(target_arch = "wasm32"))]
-            listening: self.voice.as_ref().map(|v| v.listening(now)),
+            listening: self.voice.as_ref().filter(|_| self.replay.is_none()).map(|v| v.listening(now)),
             #[cfg(target_arch = "wasm32")]
             listening: None,
+            hifz: self.settings.hifz,
+            #[cfg(not(target_arch = "wasm32"))]
+            replay: self.replay.as_ref().map(|r| r.button(now)),
+            #[cfg(target_arch = "wasm32")]
+            replay: None,
         };
         let mut search = std::mem::take(&mut self.search);
         let action = header::show(ui, &mut self.env(), &mut search, input);
@@ -337,10 +348,13 @@ impl App {
         }
     }
 
-    /// What the title bar says instead of the view's title: recording, listening, or a note.
+    /// What the title bar says instead of the view's title: a replay, recording, listening, or a note.
     fn status(&self) -> Option<String> {
         #[cfg(not(target_arch = "wasm32"))]
         {
+            if let Some(replay) = &self.replay {
+                return Some(replay.title(self.voice.as_ref()));
+            }
             let listening = self.voice.as_ref().map(|v| v.summary());
             if let Some(r) = &self.recorder {
                 let rec = format!("● Recording from {} · {:.0}:{:02.0}", r.start_word(), (r.elapsed() / 60.0).floor(), r.elapsed() % 60.0);
@@ -353,26 +367,114 @@ impl App {
         self.note.as_ref().map(|(note, _)| note.clone())
     }
 
-    /// Starts following the recitation (joining or starting quran-voice's listener), or stops.
+    /// Starts following the recitation (joining or starting quran-voice's listener), or stops. During a replay: the
+    /// replay ends, and listening starts.
     #[cfg(not(target_arch = "wasm32"))]
     fn toggle_listening(&mut self, ctx: &egui::Context, now: f64) {
         // The header, painted before this, shows the change (the spinner, or off) on the next frame.
         ctx.request_repaint();
-        if self.voice.take().is_some() {
+        if self.replay.take().is_some() {
+            self.voice = None;
+        } else if self.voice.take().is_some() {
             return;
         }
+        self.listen(ctx, now);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn listen(&mut self, ctx: &egui::Context, now: f64) {
         match crate::voice::Voice::start(&self.settings.voice, ctx) {
             Ok(voice) => self.voice = Some(voice),
             Err(e) => self.note = Some((format!("Listening: {e}"), now + 10.0)),
         }
     }
 
-    /// The listener's news, before the header shows it; a listener that failed is dropped.
+    /// A listener this app started runs the model the settings name: chosen anew, it starts again with it (one joined
+    /// keeps its own). A replay keeps its model; listening after it starts with the new one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn follow_model(&mut self, ctx: &egui::Context, now: f64) {
+        let other = self.voice.as_ref().is_some_and(|v| !v.joined() && v.model() != self.settings.voice.model);
+        if other && self.replay.is_none() {
+            crate::stats::note(|| format!("voice: the listener starts again with {}", settings::model_folder(&self.settings.voice.model)));
+            self.voice = None;
+            self.listen(ctx, now);
+        }
+    }
+
+    /// Replays the newest recording with the voice pointer following it, from where it was recorded, or stops the
+    /// replay (or calls it off while it starts). Live listening stops for it and comes back after. A recording under
+    /// way is saved first, and is the one replayed.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn toggle_replay(&mut self, ctx: &egui::Context, now: f64) {
+        ctx.request_repaint();
+        if self.replay.is_some() {
+            return self.end_replay(ctx, now, None);
+        }
+        if self.recorder.is_some() {
+            self.toggle_recording(ctx, now);
+        }
+        let Some(wav) = crate::recorder::newest() else {
+            self.note = Some(("Replay: no recording yet (Record makes one)".into(), now + 6.0));
+            return;
+        };
+        // (The live listener lets its model go before the replay's loads.)
+        let resume = self.voice.take().is_some();
+        match crate::voice::Replay::start(&self.settings.voice, ctx, &wav, resume) {
+            Ok((replay, voice)) => {
+                if let Some((at, page)) = replay.start {
+                    let view = match self.view {
+                        View::Page(_) if page > 0 => View::Page(page),
+                        view => view.holding(at, &self.juzs.items),
+                    };
+                    self.go(ctx, view.at(Some(at)));
+                }
+                (self.replay, self.voice) = (Some(replay), Some(voice));
+            }
+            Err(e) => {
+                self.note = Some((format!("Replay: {e}"), now + 10.0));
+                if resume {
+                    self.listen(ctx, now);
+                }
+            }
+        }
+    }
+
+    /// The replay is over (stopped, called off, played out, or failed: `note` says why): its sound and its listener
+    /// stop, and listening comes back if it was on.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn end_replay(&mut self, ctx: &egui::Context, now: f64, note: Option<String>) {
+        let Some(replay) = self.replay.take() else { return };
+        self.voice = None;
+        let resume = replay.resume;
+        drop(replay);
+        if resume {
+            self.listen(ctx, now);
+        }
+        if let Some(note) = note {
+            self.note = Some((note, now + 10.0));
+        }
+        ctx.request_repaint();
+    }
+
+    /// The replay's frame: its clock in the title bar moves on, and it ends once played out.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn tick_replay(&mut self, ctx: &egui::Context, now: f64) {
+        let Some(replay) = self.replay.as_mut() else { return };
+        match replay.tick(self.voice.as_ref(), now) {
+            crate::voice::Tick::Going => ctx.request_repaint_after_secs(0.25),
+            crate::voice::Tick::Over(note) => self.end_replay(ctx, now, note),
+        }
+    }
+
+    /// The listener's news, before the header shows it; a listener that failed is dropped (a replay's when the
+    /// replay ends).
     #[cfg(not(target_arch = "wasm32"))]
     fn hear_voice(&mut self, ctx: &egui::Context, now: f64) {
         let Some(voice) = self.voice.as_mut() else { return };
         voice.poll(ctx, &self.settings.voice);
-        if let crate::voice::Status::Failed(e) = voice.status() {
+        if let crate::voice::Status::Failed(e) = voice.status()
+            && self.replay.is_none()
+        {
             self.note = Some((format!("Listening stopped: {e}"), now + 10.0));
             self.voice = None;
         }
@@ -389,7 +491,8 @@ impl App {
         let words = self.reader.as_ref().filter(|_| self.results.is_none()).map_or(&[][..], |r| &r.words[..]);
         let touched = touched || self.reader.as_ref().is_some_and(|r| r.touched);
         let steer = voice.frame(ctx, &self.settings.voice, &self.colors, &self.chapters.items, words, ground, touched);
-        if steer.closed && self.settings.voice.stop_on_closing {
+        // (A replay goes on to the recording's end.)
+        if steer.closed && self.settings.voice.stop_on_closing && self.replay.is_none() {
             self.note = Some(("Listening stopped: sadaqa-llahu-l-'azim".into(), now + 5.0));
             self.voice = None;
             // The header, already painted, still shows the microphone on.
@@ -462,9 +565,11 @@ impl App {
         }
     }
 
-    /// Starts recording at the reading position, or stops and saves (for `qv enroll`).
+    /// Starts recording at the reading position, or stops and saves (for `qv enroll`). A replay ends first: its sound
+    /// is not the reader's.
     #[cfg(not(target_arch = "wasm32"))]
-    fn toggle_recording(&mut self, now: f64) {
+    fn toggle_recording(&mut self, ctx: &egui::Context, now: f64) {
+        self.end_replay(ctx, now, None);
         let result = match self.recorder.take() {
             Some(r) => r.finish().map(|wav| format!("Saved {}", wav.file_name().map_or(String::new(), |n| n.to_string_lossy().into_owned()))),
             None => match self.reader.as_ref().and_then(|r| r.position) {
@@ -579,14 +684,22 @@ impl App {
             Some(HeaderAction::Open(to)) => go = Some(to),
             Some(HeaderAction::Results(query)) => self.show_results(&ctx, &query),
             Some(HeaderAction::ToggleSettings) => self.settings_open = !self.settings_open,
+            Some(HeaderAction::ToggleHifz) => {
+                self.settings.hifz = !self.settings.hifz;
+                self.settings_changed(&ctx);
+            }
             #[cfg(not(target_arch = "wasm32"))]
-            Some(HeaderAction::ToggleRecord) => self.toggle_recording(now),
+            Some(HeaderAction::ToggleRecord) => self.toggle_recording(&ctx, now),
             #[cfg(not(target_arch = "wasm32"))]
             Some(HeaderAction::ToggleListen) => self.toggle_listening(&ctx, now),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(HeaderAction::ToggleReplay) => self.toggle_replay(&ctx, now),
             #[cfg(target_arch = "wasm32")]
-            Some(HeaderAction::ToggleRecord | HeaderAction::ToggleListen) => {}
+            Some(HeaderAction::ToggleRecord | HeaderAction::ToggleListen | HeaderAction::ToggleReplay) => {}
             None => {}
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.tick_replay(&ctx, now);
         self.track_recording(&ctx, now);
 
         // Everything below the header is the pointer's ground.
@@ -651,11 +764,14 @@ impl App {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 self.panel.listener = self.voice.as_ref().and_then(|v| v.lacks(&self.settings.voice, now));
+                self.panel.joined = self.replay.is_none() && self.voice.as_ref().is_some_and(crate::voice::Voice::joined);
             }
             if self.panel.show(&ctx, screen, &mut self.settings, &self.colors, &self.client, &mut self.fonts, page_em) {
                 self.settings_open = false;
             }
             self.settings_changed(&ctx);
+            #[cfg(not(target_arch = "wasm32"))]
+            self.follow_model(&ctx, now);
         } else {
             self.panel.closed();
         }
@@ -690,9 +806,9 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
-        // Stops the listener if this app started it.
+        // Stops the listener if this app started it, and a replay's sound.
         #[cfg(not(target_arch = "wasm32"))]
-        drop(self.voice.take());
+        drop((self.voice.take(), self.replay.take()));
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(r) = self.recorder.take() {
             match r.finish() {

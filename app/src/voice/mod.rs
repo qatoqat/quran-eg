@@ -9,9 +9,10 @@
 //! levels the listener sends when the settings ask). `preview` shows in
 //! the settings `script`, a recitation of a few lines with a listener of its own, which `player` plays
 //! through the same marker (`dock` draws the rest), so their changes can be seen at work.
-//! `installed` tells there which listener is installed. Tuned movement: `hold` keeps a jump ahead back until the reading
-//! goes on there; `keep` keeps the line being read in view; `toast` says where the reader is about to be taken, and,
-//! with `weak`, when the microphone hears them too faintly.
+//! `installed` tells there which listener is installed and which models it can run. Tuned movement: `hold` keeps a jump
+//! ahead back until the reading goes on there; `keep` keeps the line being read in view; `toast` says where the reader
+//! is about to be taken, and, with `weak`, when the microphone hears them too faintly. `replay` plays the newest
+//! recording through `sound` while a listener of its own hears it, so the pointer follows it as it does the reader.
 
 mod dock;
 mod follow;
@@ -27,7 +28,9 @@ mod motion;
 mod player;
 mod presence;
 mod preview;
+mod replay;
 mod script;
+mod sound;
 mod toast;
 mod visible;
 mod weak;
@@ -50,10 +53,11 @@ use crate::pointer::Lens;
 use crate::theme::Colors;
 
 pub use self::glide::CURVES;
-pub use self::installed::Installed;
+pub use self::installed::{Installed, Model};
 pub use self::link::folder;
 pub use self::link::Loc;
 pub use self::preview::Preview;
+pub use self::replay::{Replay, Tick};
 
 use crate::reader::Slot;
 
@@ -101,6 +105,10 @@ pub struct Voice {
     /// and stays where it appeared.
     line: Option<(f32, f32)>,
     toast: toast::Pin,
+    /// The model it was started with (a [`Settings::model`]).
+    model: String,
+    /// It follows a replay of a recording, not the microphone.
+    replay: bool,
 }
 
 /// What the joined listener has sent beside its pointers.
@@ -154,10 +162,20 @@ fn ask_frame(ctx: &egui::Context, wake: Wake) {
 }
 
 impl Voice {
-    /// Joins quran-voice's listener, or starts the installed one.
+    /// Joins quran-voice's listener, or starts the installed one with the model the settings name.
     pub fn start(settings: &Settings, ctx: &egui::Context) -> Result<Voice, String> {
-        let link = Link::start(link::folder(&settings.listener), ctx.clone())?;
-        Ok(Voice {
+        let link = Link::start(link::folder(&settings.listener), &settings.model, ctx.clone())?;
+        Ok(Voice::with(link, &settings.model, false))
+    }
+
+    /// Starts the installed listener on the recording `wav` for a replay, to hear it from when `cue`'s sound plays it.
+    fn replay(settings: &Settings, ctx: &egui::Context, wav: &std::path::Path, cue: std::sync::Arc<sound::Cue>) -> Result<Voice, String> {
+        let link = Link::replay(link::folder(&settings.listener), &settings.model, wav, cue, ctx.clone())?;
+        Ok(Voice::with(link, &settings.model, true))
+    }
+
+    fn with(link: Link, model: &str, replay: bool) -> Voice {
+        Voice {
             link,
             status: Status::Starting,
             marker: Marker::default(),
@@ -170,11 +188,23 @@ impl Voice {
             weak: Weak::default(),
             line: None,
             toast: toast::Pin::default(),
-        })
+            model: model.to_owned(),
+            replay,
+        }
     }
 
     pub fn status(&self) -> &Status {
         &self.status
+    }
+
+    /// The model its listener was started with (a [`Settings::model`]).
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// It joined a listener started elsewhere, which runs a model of its own choosing.
+    pub fn joined(&self) -> bool {
+        self.link.joined()
     }
 
     /// One line for the title bar: what the listener hears (or that the microphone does not).
@@ -185,21 +215,34 @@ impl Voice {
         }
     }
 
+    /// Where the listener hears the reader, once it does: a place, or that it lost it.
+    fn place(&self) -> Option<String> {
+        if let Some(s) = self.marker.stray() {
+            return Some(format!("lost the place ({}:{} heard elsewhere)", s.to.0, s.to.1));
+        }
+        let h = self.marker.last()?;
+        Some(match h.loc {
+            (0, ayah, _) => format!("{} · {}", formula(ayah), h.state),
+            (surah, 0, _) => format!("basmala of surah {surah} · {}", h.state),
+            (surah, ayah, word) => format!("{surah}:{ayah} word {word} · {}", h.state),
+        })
+    }
+
     /// What the listener hears, or that it is starting or has stopped.
     fn heard_summary(&self) -> String {
-        if self.status == Status::Listening
-            && let Some(s) = self.marker.stray()
-        {
-            return format!("◉ Listening · lost the place ({}:{} heard elsewhere)", s.to.0, s.to.1);
+        match &self.status {
+            Status::Starting if self.link.started_it() => "◉ Starting the listener…".into(),
+            Status::Starting => "◉ Joining the listener…".into(),
+            Status::Failed(e) => format!("Listening stopped: {e}"),
+            Status::Listening => self.place().map_or_else(|| "◉ Listening: recite from any page".into(), |p| format!("◉ Listening · {p}")),
         }
-        match (&self.status, self.marker.last()) {
-            (Status::Starting, _) if self.link.started_it() => "◉ Starting the listener…".into(),
-            (Status::Starting, _) => "◉ Joining the listener…".into(),
-            (Status::Failed(e), _) => format!("Listening stopped: {e}"),
-            (Status::Listening, None) => "◉ Listening: recite from any page".into(),
-            (Status::Listening, Some(h)) if h.loc.0 == 0 => format!("◉ Listening · {} · {}", formula(h.loc.1), h.state),
-            (Status::Listening, Some(h)) if h.loc.1 == 0 => format!("◉ Listening · basmala of surah {} · {}", h.loc.0, h.state),
-            (Status::Listening, Some(h)) => format!("◉ Listening · {}:{} word {} · {}", h.loc.0, h.loc.1, h.loc.2, h.state),
+    }
+
+    /// What a replay's listener hears of the recording, for the title bar.
+    pub fn replay_summary(&self) -> String {
+        match &self.status {
+            Status::Starting => "starting the listener…".into(),
+            _ => self.place().unwrap_or_else(|| "listening…".into()),
         }
     }
 
@@ -329,7 +372,8 @@ impl Voice {
             self.line = Some((at.y, em));
         }
         let mut steer = shown.steer;
-        let weak = self.status == Status::Listening && self.weak.tick(now);
+        // (A replay's is the recording's microphone, which nobody can move closer now.)
+        let weak = self.status == Status::Listening && !self.replay && self.weak.tick(now);
         let note = shown.offer.map(Note::of).or(weak.then_some(Note::Weak));
         let toast = note.as_ref().map(|note| Toast::new(ctx, note, chapters, colors, area.width() - 24.0, 1.0));
         let height = toast.as_ref().map_or(0.0, Toast::height);

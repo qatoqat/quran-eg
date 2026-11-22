@@ -1,7 +1,8 @@
 //! The listener: quran-voice's `qv listen` (one already running, or the installed one started from its
-//! folder) and the WebSocket on which it reports where the reader is and how its microphone is. A
-//! thread reads its messages and sends it the words on screen, which it uses as a prior when looking
-//! for the place.
+//! folder with the model the settings name) and the WebSocket on which it reports where the reader is and
+//! how its microphone is. A thread reads its messages and sends it the words on screen, which it uses as a
+//! prior when looking for the place. A replay's listener is the installed one on a port of its own, cued
+//! on the recording: it starts hearing it when the replay's sound is heard.
 
 use std::io::ErrorKind;
 use std::net::{SocketAddr, TcpStream};
@@ -18,12 +19,16 @@ use tungstenite::stream::MaybeTlsStream;
 use super::meter::Gate;
 use super::motion::Plan;
 use super::presence::{self, Presence};
+use super::sound::Cue;
 
 /// `qv listen`'s port, or the one `QURAN_EG_VOICE_PORT` names (tests run a stand-in there, clear of
 /// a listener the user runs).
 static PORT: LazyLock<u16> = LazyLock::new(|| std::env::var("QURAN_EG_VOICE_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8765));
 /// How long a starting listener may take to load its model and open the port.
 const START_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a replay's sound may take to open, and to say when its first sample is heard once it plays.
+const SOUND_TIMEOUT: Duration = Duration::from_secs(10);
+const HEARD_TIMEOUT: Duration = Duration::from_millis(300);
 /// Earlier sessions' logs kept beside `listen.log`.
 const LOGS_KEPT: usize = 5;
 
@@ -111,6 +116,8 @@ pub struct Want {
 pub struct Link {
     /// The listener this link started (stopped with it), if it did not join a running one.
     child: Option<Child>,
+    /// It joined a listener that was running (started elsewhere, so not stopped here).
+    joined: bool,
     events: Receiver<Event>,
     visible: Sender<(Loc, Loc, bool)>,
     want: Sender<Want>,
@@ -217,17 +224,32 @@ fn heard(v: &serde_json::Value) -> Option<Heard> {
 }
 
 impl Link {
-    /// Joins a listener already on the port, or starts the one installed in `dir` and joins it.
-    pub fn start(dir: Option<PathBuf>, ctx: egui::Context) -> Result<Link, String> {
-        let addr = SocketAddr::from(([127, 0, 0, 1], *PORT));
+    /// Joins a listener already on the port, or starts the one installed in `dir` with the model `model` (a
+    /// [`quran_core::settings::Voice::model`]) and joins it.
+    pub fn start(dir: Option<PathBuf>, model: &str, ctx: egui::Context) -> Result<Link, String> {
+        let port = *PORT;
+        let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let running = TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok();
         let (child, log) = if running {
             (None, None)
         } else {
             let dir = dir.ok_or("no data directory for the listener")?;
-            let (child, log) = spawn(&dir)?;
+            let (child, log) = spawn(&dir, model, port, None)?;
             (Some(child), Some(log))
         };
+        Link::open(child, log, port, None, ctx)
+    }
+
+    /// Starts the listener installed in `dir` with the model `model` on a port of its own, `wav` its input, cued: it
+    /// hears the recording from when `cue`'s sound plays its first sample.
+    pub fn replay(dir: Option<PathBuf>, model: &str, wav: &Path, cue: Arc<Cue>, ctx: egui::Context) -> Result<Link, String> {
+        let dir = dir.ok_or("no data directory for the listener")?;
+        let port = spare_port()?;
+        let (child, log) = spawn(&dir, model, port, Some(wav))?;
+        Link::open(Some(child), Some(log), port, Some(cue), ctx)
+    }
+
+    fn open(child: Option<Child>, log: Option<PathBuf>, port: u16, cue: Option<Arc<Cue>>, ctx: egui::Context) -> Result<Link, String> {
         let (events_tx, events) = channel();
         let (visible, visible_rx) = channel();
         let (want, want_rx) = channel();
@@ -235,9 +257,9 @@ impl Link {
         let flag = stop.clone();
         std::thread::Builder::new()
             .name("voice-link".into())
-            .spawn(move || run(&events_tx, (&visible_rx, &want_rx), &flag, &ctx))
+            .spawn(move || run(port, cue.as_deref(), &events_tx, (&visible_rx, &want_rx), &flag, &ctx))
             .map_err(|e| format!("could not start the listener's thread: {e}"))?;
-        Ok(Link { child, events, visible, want, stop, log })
+        Ok(Link { joined: child.is_none(), child, events, visible, want, stop, log })
     }
 
     /// What arrived since the last call.
@@ -247,11 +269,16 @@ impl Link {
         if let Some(child) = &mut self.child
             && let Ok(Some(status)) = child.try_wait()
         {
-            let tail = self.log.as_ref().and_then(|l| std::fs::read_to_string(l).ok()).and_then(|t| t.lines().rev().find(|l| !l.trim().is_empty()).map(str::to_string));
-            out.push(Event::Failed(format!("the listener stopped ({status}){}", tail.map_or(String::new(), |t| format!(": {t}")))));
+            let log = self.log.as_ref().and_then(|l| std::fs::read_to_string(l).ok()).unwrap_or_default();
+            out.push(Event::Failed(why(&log, status)));
             self.child = None;
         }
         out
+    }
+
+    /// It joined a listener started elsewhere (which keeps running, with its own model, when the link goes).
+    pub fn joined(&self) -> bool {
+        self.joined
     }
 
     /// The words on screen (first and last), so the listener looks there first; `by_reader`: the reader
@@ -281,22 +308,53 @@ impl Drop for Link {
     }
 }
 
-/// Starts `qv listen` from its installed folder; its output goes to `listen.log` there.
-fn spawn(dir: &Path) -> Result<(Child, PathBuf), String> {
+/// Why a listener that exited (`status`) stopped, from its log: it is too old to replay, or the last line it wrote.
+fn why(log: &str, status: impl std::fmt::Display) -> String {
+    if log.contains("unexpected argument '--cue'") {
+        return "needs a newer listener (install quran-voice's listener again)".into();
+    }
+    match log.lines().rev().find(|l| !l.trim().is_empty()) {
+        Some(line) => format!("the listener stopped ({status}): {line}"),
+        None => format!("the listener stopped ({status})"),
+    }
+}
+
+/// A port nothing listens on, for a replay's listener (clear of a listener the reader runs).
+fn spare_port() -> Result<u16, String> {
+    let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("no port for the replay's listener: {e}"))?;
+    probe.local_addr().map(|a| a.port()).map_err(|e| format!("no port for the replay's listener: {e}"))
+}
+
+/// Starts `qv listen` from its installed folder with the model `model`, on `port`: the microphone's, its output going to
+/// `listen.log` there; or, cued, `file`'s, its output going to `replay.log`.
+fn spawn(dir: &Path, model: &str, port: u16, file: Option<&Path>) -> Result<(Child, PathBuf), String> {
     let qv = dir.join("qv");
-    if !qv.is_file() || !dir.join("model").join("model.bpk").is_file() || !dir.join("ref.json").is_file() {
+    let run = quran_core::settings::model_folder(model);
+    if !qv.is_file() || !dir.join("ref.json").is_file() || (model.is_empty() && !dir.join(&run).join("model.bpk").is_file()) {
         return Err(format!("no listener installed in {} (run scripts/install-listener.sh in quran-voice)", dir.display()));
     }
-    let log = dir.join("listen.log");
-    // The last few sessions' logs stay (listen.1.log is the one before), to look back at a session.
-    for i in (1..LOGS_KEPT).rev() {
-        let _ = std::fs::rename(dir.join(format!("listen.{i}.log")), dir.join(format!("listen.{}.log", i + 1)));
+    if !dir.join(&run).join("model.bpk").is_file() {
+        return Err(format!("no model {model} in {} (choose another in the settings)", dir.join("models").display()));
     }
-    let _ = std::fs::rename(&log, dir.join("listen.1.log"));
+    let log = match file {
+        Some(_) => dir.join("replay.log"),
+        None => {
+            // The last few sessions' logs stay (listen.1.log is the one before), to look back at a session.
+            for i in (1..LOGS_KEPT).rev() {
+                let _ = std::fs::rename(dir.join(format!("listen.{i}.log")), dir.join(format!("listen.{}.log", i + 1)));
+            }
+            let _ = std::fs::rename(dir.join("listen.log"), dir.join("listen.1.log"));
+            dir.join("listen.log")
+        }
+    };
     let out = std::fs::File::create(&log).map_err(|e| format!("{}: {e}", log.display()))?;
     let err = out.try_clone().map_err(|e| format!("{}: {e}", log.display()))?;
-    let child = Command::new(&qv)
-        .args(["listen", "--run", "model", "--reference", "ref.json", "--port", &(*PORT).to_string()])
+    let mut command = Command::new(&qv);
+    command.args(["listen", "--run", &run, "--reference", "ref.json", "--port", &port.to_string()]);
+    if let Some(file) = file {
+        command.arg("--file").arg(file).arg("--cue");
+    }
+    let child = command
         .current_dir(dir)
         .stdin(Stdio::null())
         .stdout(out)
@@ -306,7 +364,38 @@ fn spawn(dir: &Path) -> Result<(Child, PathBuf), String> {
     Ok((child, log))
 }
 
-fn run(events: &Sender<Event>, (visible, want): (&Receiver<(Loc, Loc, bool)>, &Receiver<Want>), stop: &AtomicBool, ctx: &egui::Context) {
+/// A cued listener's start: once the replay's sound is open (playing silence), it plays the recording, and the listener
+/// is told how soon its first sample is heard, so that its feed starts with it.
+fn start_cued(ws: &mut tungstenite::WebSocket<MaybeTlsStream<TcpStream>>, cue: &Cue, stop: &AtomicBool) -> Result<(), String> {
+    let waited = Instant::now();
+    while !cue.ready() {
+        if let Some(e) = cue.error() {
+            return Err(e);
+        }
+        if stop.load(Ordering::Relaxed) || waited.elapsed() > SOUND_TIMEOUT {
+            return Err("the sound did not start".into());
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    cue.go();
+    let asked = Instant::now();
+    let heard = loop {
+        match cue.heard() {
+            Some(at) => break at,
+            None if asked.elapsed() > HEARD_TIMEOUT => break Instant::now(),
+            None => std::thread::sleep(Duration::from_micros(500)),
+        }
+    };
+    let secs = heard.saturating_duration_since(Instant::now()).as_secs_f64();
+    ws.send(Message::text(format!(r#"{{"start":{{"in":{secs:.4}}}}}"#))).map_err(|e| format!("listener connection: {e}"))?;
+    crate::stats::note(|| {
+        let unix = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+        format!("replay: the sound's first sample is heard {:.1} ms from now (unix {:.3}), the listener's feed starts then", secs * 1000.0, unix + secs)
+    });
+    Ok(())
+}
+
+fn run(port: u16, cue: Option<&Cue>, events: &Sender<Event>, (visible, want): (&Receiver<(Loc, Loc, bool)>, &Receiver<Want>), stop: &AtomicBool, ctx: &egui::Context) {
     let send = |e: Event| {
         let _ = events.send(e);
         ctx.request_repaint();
@@ -316,9 +405,10 @@ fn run(events: &Sender<Event>, (visible, want): (&Receiver<(Loc, Loc, bool)>, &R
         if stop.load(Ordering::Relaxed) {
             return;
         }
-        match tungstenite::connect(format!("ws://127.0.0.1:{}", *PORT)) {
+        match tungstenite::connect(format!("ws://127.0.0.1:{port}")) {
             Ok((ws, _)) => break ws,
-            Err(_) if started.elapsed() < START_TIMEOUT => std::thread::sleep(Duration::from_millis(250)),
+            // (A replay is waited on: its listener is tried more often.)
+            Err(_) if started.elapsed() < START_TIMEOUT => std::thread::sleep(Duration::from_millis(if cue.is_some() { 20 } else { 250 })),
             Err(e) => return send(Event::Failed(format!("could not reach the listener: {e}"))),
         }
     };
@@ -327,6 +417,11 @@ fn run(events: &Sender<Event>, (visible, want): (&Receiver<(Loc, Loc, bool)>, &R
         && let Err(e) = s.set_read_timeout(Some(Duration::from_millis(50)))
     {
         return send(Event::Failed(format!("listener connection: {e}")));
+    }
+    if let Some(cue) = cue
+        && let Err(e) = start_cued(&mut ws, cue, stop)
+    {
+        return send(Event::Failed(e));
     }
     send(Event::Connected);
     let (mut gate, mut presence) = (Gate::default(), Presence::default());
@@ -409,6 +504,20 @@ mod tests {
         assert_eq!((q.seq, t, q.ev_end), (8, 12.82, q.now), "no ev_end: no further than now");
         assert!(parse(r#"{"voice":{"t":12.84,"db":-31.5}}"#).is_none(), "a level is the link thread's");
         assert!(matches!(read(r#"{"voice":{"t":12.84,"db":-31.5}}"#), Some(Read::Voice(t, db)) if t == 12.84 && db == -31.5));
+    }
+
+    #[test]
+    fn a_listener_that_stopped_says_why_in_its_log() {
+        assert_eq!(why("pointer on ws://127.0.0.1:8765\nmodel gone\n\n", "exit status: 1"), "the listener stopped (exit status: 1): model gone");
+        let old = "error: unexpected argument '--cue' found\n\nUsage: qv listen --run <RUN>\n\nFor more information, try '--help'.\n";
+        assert!(why(old, "exit status: 2").starts_with("needs a newer listener"));
+        assert_eq!(why("", "signal: 9"), "the listener stopped (signal: 9)");
+    }
+
+    #[test]
+    fn a_spare_port_is_free_and_not_the_listeners() {
+        let port = spare_port().unwrap();
+        assert!(port != 8765 && std::net::TcpListener::bind(("127.0.0.1", port)).is_ok());
     }
 
     #[test]

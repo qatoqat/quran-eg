@@ -1,7 +1,8 @@
-//! Which listener is installed, shown under its folder in the settings: the model (the first line of its
+//! Which listener is installed, shown under its folder in the settings: the model it runs (the first line of its
 //! README.txt, or its folder's name) and the `qv` build (when it was written), each with the start of its md5,
 //! so a run can be told apart from the next one. The files are tens of megabytes: they are hashed on a thread,
-//! and again only once one of them was rewritten.
+//! and again only once one of them was rewritten. Beside them, the models it can run: its `model/` and each
+//! folder of its `models/`, by their READMEs.
 
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
@@ -14,8 +15,8 @@ use crate::task::{self, Pool, Poll};
 
 /// How often the files are looked at again while the settings show them (a new model may come meanwhile).
 const LOOK_AGAIN: f64 = 2.0;
-/// The files that tell a listener: a new one of any is read again.
-const FILES: [&str; 3] = ["model/README.txt", "model/model.bpk", "qv"];
+/// Lines of a model's README after its name that say what it is.
+const ABOUT_LINES: usize = 2;
 
 /// What the settings show of the installed listener.
 #[derive(Clone, Debug, PartialEq)]
@@ -24,27 +25,43 @@ pub struct Lines {
     pub qv: String,
 }
 
-/// A folder and its files as last seen: each one's length and when it was written (`None` if missing).
-type Key = (PathBuf, [Option<(u64, SystemTime)>; 3]);
+/// A model the listener can run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Model {
+    /// Its name in the settings: a folder of `models/`, or empty for `model/`.
+    pub name: String,
+    /// The first line of its README.txt (or its folder's name), and the lines after it that say what it is.
+    pub title: String,
+    pub about: String,
+}
+
+/// A folder, the model's folder in it, and the files that tell them as last seen: each one's length and when it
+/// was written (`None` if missing). A new one of any is read again.
+type Key = (PathBuf, PathBuf, [Option<(u64, SystemTime)>; 3]);
 
 #[derive(Default)]
 pub struct Installed {
-    /// The folder and its files' state the lines are for, or are being read for.
+    /// The folders and their files' state the lines are for, or are being read for.
     key: Option<Key>,
     lines: Option<Lines>,
     reading: Option<Receiver<Lines>>,
     /// When the files were last looked at (UI time, s).
     looked: f64,
+    /// The models of the folder, and when they were listed (UI time, s).
+    models: Option<(PathBuf, f64, Vec<Model>)>,
 }
 
 impl Installed {
-    /// The listener installed in `dir`, read again when one of its files changed; `None` while it is first read.
-    pub fn lines(&mut self, ctx: &egui::Context, dir: &Path) -> Option<&Lines> {
+    /// The listener installed in `dir` and its model `model` (a [`quran_core::settings::Voice::model`]), read again
+    /// when one of their files changed; `None` while it is first read.
+    pub fn lines(&mut self, ctx: &egui::Context, dir: &Path, model: &str) -> Option<&Lines> {
         let now = ctx.input(|i| i.time);
-        let moved = self.key.as_ref().is_none_or(|k| k.0 != dir);
+        let model = dir.join(quran_core::settings::model_folder(model));
+        let moved = self.key.as_ref().is_none_or(|k| k.0 != dir || k.1 != model);
         if moved || now - self.looked >= LOOK_AGAIN {
             self.looked = now;
-            let key = (dir.to_path_buf(), FILES.map(|f| stamp(&dir.join(f))));
+            let files = [model.join("README.txt"), model.join("model.bpk"), dir.join("qv")];
+            let key = (dir.to_path_buf(), model.clone(), files.map(|f| stamp(&f)));
             if self.key.as_ref() != Some(&key) {
                 if moved {
                     self.lines = None;
@@ -52,7 +69,7 @@ impl Installed {
                 self.key = Some(key);
                 let dir = dir.to_path_buf();
                 // A reading still under way for the files of before is dropped with its receiver.
-                self.reading = Some(task::run(Pool::Draw, ctx, move || read(&dir)));
+                self.reading = Some(task::run(Pool::Draw, ctx, move || read(&dir, &model)));
             }
         }
         if let Some(rx) = &self.reading {
@@ -64,6 +81,36 @@ impl Installed {
         }
         self.lines.as_ref()
     }
+
+    /// The models the listener in `dir` can run, its own `model/` first; listed again every few seconds (their
+    /// READMEs are small).
+    pub fn models(&mut self, ctx: &egui::Context, dir: &Path) -> &[Model] {
+        let now = ctx.input(|i| i.time);
+        if self.models.as_ref().is_none_or(|(d, at, _)| d != dir || now - at >= LOOK_AGAIN) {
+            self.models = Some((dir.to_path_buf(), now, models(dir)));
+        }
+        self.models.as_ref().map_or(&[], |m| &m.2)
+    }
+}
+
+/// `model/`, then each folder of `models/` that holds a model, by name.
+fn models(dir: &Path) -> Vec<Model> {
+    let found = std::fs::read_dir(dir.join("models")).into_iter().flatten().flatten().filter_map(|entry| {
+        let name = quran_core::settings::storage::sanitize_model(entry.file_name().to_str()?)?;
+        entry.path().join("model.bpk").is_file().then(|| described(&entry.path(), name))
+    });
+    let mut found: Vec<Model> = found.collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    std::iter::once(described(&dir.join("model"), String::new())).chain(found).collect()
+}
+
+/// A model by its README: its name, and what it is.
+fn described(dir: &Path, name: String) -> Model {
+    let readme = std::fs::read_to_string(dir.join("README.txt")).unwrap_or_default();
+    let mut lines = readme.lines().map(str::trim).skip_while(|l| l.is_empty());
+    let title = lines.next().map_or_else(|| folder_name(dir), str::to_owned);
+    let about = lines.take(ABOUT_LINES).collect::<Vec<_>>().join("\n");
+    Model { name, title, about }
 }
 
 fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
@@ -71,11 +118,10 @@ fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
     Some((meta.len(), meta.modified().ok()?))
 }
 
-/// The listener in `dir`, read from its files (they are hashed).
-fn read(dir: &Path) -> Lines {
-    let model = dir.join("model");
+/// The listener in `dir` and its model in `model`, read from their files (they are hashed).
+fn read(dir: &Path, model: &Path) -> Lines {
     let model = match md5_start(&model.join("model.bpk")) {
-        Some(md5) => format!("{}, md5 {md5}", model_name(&model)),
+        Some(md5) => format!("{}, md5 {md5}", model_name(model)),
         None => "not installed".into(),
     };
     let qv = dir.join("qv");
@@ -94,11 +140,14 @@ fn model_name(dir: &Path) -> String {
     let readme = std::fs::read_to_string(dir.join("README.txt")).unwrap_or_default();
     match readme.lines().next().map(str::trim).filter(|l| !l.is_empty()) {
         Some(line) => line.to_owned(),
-        None => {
-            let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-            dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned())
-        }
+        None => folder_name(dir),
     }
+}
+
+/// A folder's name, by the name a link to it points at.
+fn folder_name(dir: &Path) -> String {
+    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    dir.file_name().map_or_else(|| dir.display().to_string(), |n| n.to_string_lossy().into_owned())
 }
 
 /// The first 8 hex digits of a file's md5, as `md5sum` prints it; `None` if it cannot be read.
@@ -154,14 +203,14 @@ mod tests {
         std::fs::write(dir.join("model/model.bpk"), "abc").unwrap();
         std::fs::write(dir.join("model/README.txt"), "  personal-p2 (installed 2026-11-21 ~20:00)\nmore\n").unwrap();
         std::fs::write(dir.join("qv"), "").unwrap();
-        let lines = read(&dir);
+        let lines = read(&dir, &dir.join("model"));
         assert_eq!(lines.model, "personal-p2 (installed 2026-11-21 ~20:00), md5 90015098");
         assert!(lines.qv.starts_with("qv of 2") && lines.qv.ends_with(", md5 d41d8cd9"), "{}", lines.qv);
         // No README: the model's folder, by the name a link to it points at.
         std::fs::remove_file(dir.join("model/README.txt")).unwrap();
         std::fs::rename(dir.join("model"), dir.join("model.p2")).unwrap();
         std::os::unix::fs::symlink("model.p2", dir.join("model")).unwrap();
-        assert_eq!(read(&dir).model, "model.p2, md5 90015098");
+        assert_eq!(read(&dir, &dir.join("model")).model, "model.p2, md5 90015098");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -169,9 +218,9 @@ mod tests {
     fn missing_files_read_as_not_installed() {
         let dir = scratch("missing");
         std::fs::write(dir.join("model/README.txt"), "a run\n").unwrap();
-        let lines = read(&dir);
+        let lines = read(&dir, &dir.join("model"));
         assert_eq!((lines.model.as_str(), lines.qv.as_str()), ("not installed", "not installed"));
-        assert_eq!(read(&dir.join("nowhere")), lines);
+        assert_eq!(read(&dir.join("nowhere"), &dir.join("nowhere/model")), lines);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -185,20 +234,48 @@ mod tests {
                 if installed.reading.is_none() {
                     break;
                 }
-                installed.lines(&ctx, &dir);
+                installed.lines(&ctx, &dir, "");
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
-            installed.lines(&ctx, &dir).cloned().unwrap()
+            installed.lines(&ctx, &dir, "").cloned().unwrap()
         };
-        installed.lines(&ctx, &dir);
+        installed.lines(&ctx, &dir, "");
         assert_eq!(wait(&mut installed).model, "model, md5 90015098");
         installed.looked = -LOOK_AGAIN;
-        installed.lines(&ctx, &dir);
+        installed.lines(&ctx, &dir, "");
         assert!(installed.reading.is_none(), "nothing changed, nothing is hashed");
         std::fs::write(dir.join("model/model.bpk"), "abcd").unwrap();
         installed.looked = -LOOK_AGAIN;
-        installed.lines(&ctx, &dir);
+        installed.lines(&ctx, &dir, "");
         assert_eq!(wait(&mut installed).model, "model, md5 e2fc714c");
+        // Another model chosen: its own line, read at once.
+        std::fs::create_dir_all(dir.join("models/g-b")).unwrap();
+        std::fs::write(dir.join("models/g-b/model.bpk"), "abc").unwrap();
+        installed.lines(&ctx, &dir, "g-b");
+        assert!(installed.lines.is_none() && installed.reading.is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_models_are_the_installed_one_then_each_folder_of_models_by_its_readme() {
+        let dir = scratch("models");
+        std::fs::write(dir.join("model/model.bpk"), "abc").unwrap();
+        std::fs::write(dir.join("model/README.txt"), "personal-p2 (installed)\nYour own.\n").unwrap();
+        for (name, readme) in [("h-a", Some("\nGeneric H-A\nRound H, arm A.\nCautious.\nMore.\n")), ("g-b", None), ("empty", None)] {
+            std::fs::create_dir_all(dir.join("models").join(name)).unwrap();
+            if name != "empty" {
+                std::fs::write(dir.join("models").join(name).join("model.bpk"), "x").unwrap();
+            }
+            if let Some(readme) = readme {
+                std::fs::write(dir.join("models").join(name).join("README.txt"), readme).unwrap();
+            }
+        }
+        std::fs::write(dir.join("models/stray.txt"), "not a model").unwrap();
+        let list = models(&dir);
+        let names: Vec<(&str, &str, &str)> = list.iter().map(|m| (m.name.as_str(), m.title.as_str(), m.about.as_str())).collect();
+        assert_eq!(names, [("", "personal-p2 (installed)", "Your own."), ("g-b", "g-b", ""), ("h-a", "Generic H-A", "Round H, arm A.\nCautious.")]);
+        // No models folder: the installed one alone, even when missing.
+        assert_eq!(models(&dir.join("nowhere")).iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), [""]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

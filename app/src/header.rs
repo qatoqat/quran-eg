@@ -1,11 +1,12 @@
 //! The header, kept to the width of the content column: the app's name on the
 //! left; in the middle the view's title, or the search box while searching; on
-//! the right a search button, the Surah | Juz | Page toggle and the settings button.
+//! the right the memorizing and search buttons, the Surah | Juz | Page toggle and the settings button (and
+//! on the desktop, left of them, Listen, Record and Replay).
 
 use egui::{Align, FontId, Layout, Rect, Sense, Stroke, Ui, UiBuilder, pos2, vec2};
 use quran_core::view::{Location, Mode, View};
 
-use crate::kit::{self, Icon, Mic};
+use crate::kit::{self, Icon, Mic, Play};
 use crate::reader::Env;
 use crate::search::{Go, SearchBox};
 use crate::theme::Colors;
@@ -21,6 +22,10 @@ pub enum HeaderAction {
     ToggleRecord,
     /// Start or stop following the recitation with the voice pointer.
     ToggleListen,
+    /// Hide the mushaf's words to recite them from memory, or show them again.
+    ToggleHifz,
+    /// Replay the last recording with the voice pointer following it, or stop (or call off) the replay.
+    ToggleReplay,
 }
 
 /// What the header shows.
@@ -35,6 +40,25 @@ pub struct HeaderInput {
     /// Recording: seconds so far and the word it started at.
     pub recording: Option<(f32, String)>,
     pub listening: Option<Listening>,
+    /// Memorizing: the words are hidden.
+    pub hifz: bool,
+    pub replay: Option<Replaying>,
+}
+
+/// The replay of the last recording, as its button shows it (desktop only).
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub enum Replaying {
+    /// Its listener starting: the spinner this far (0..1) through its turn.
+    Starting(f32),
+    /// Seconds played of the recording's.
+    Playing { at: f32, of: f32 },
+}
+
+/// `m:ss`.
+pub fn clock(secs: f32) -> String {
+    let secs = secs.max(0.0) as u32;
+    format!("{}:{:02}", secs / 60, secs % 60)
 }
 
 /// Listening: what the listener hears, and how its microphone does.
@@ -79,6 +103,10 @@ pub fn show(ui: &mut Ui, env: &mut Env<'_>, search: &mut SearchBox, input: Heade
     if kit::icon_button(&mut right, colors, Icon::Search, search.open).clicked() {
         search.toggle();
     }
+    let tip = if input.hifz { "Show the words again" } else { "Memorize: hide the words but for the ayahs' ends (click a word to see it)" };
+    if kit::icon_button(&mut right, colors, Icon::Hifz, input.hifz).on_hover_text(tip).clicked() {
+        action = Some(HeaderAction::ToggleHifz);
+    }
     // The microphone is the desktop app's (the web build has neither button).
     if cfg!(not(target_arch = "wasm32")) {
         let mic = input.listening.as_ref().map_or(Mic::Off, |l| l.mic);
@@ -104,6 +132,14 @@ pub fn show(ui: &mut Ui, env: &mut Env<'_>, search: &mut SearchBox, input: Heade
         };
         if kit::icon_button(&mut right, colors, Icon::Record, input.recording.is_some()).on_hover_text(tip).clicked() {
             action = Some(HeaderAction::ToggleRecord);
+        }
+        let (play, tip) = match input.replay {
+            None => (Play::Idle, "Replay your last recording, the voice pointer following it".to_string()),
+            Some(Replaying::Starting(turn)) => (Play::Starting(turn), "Cancel the replay (its listener is starting)".into()),
+            Some(Replaying::Playing { at, of }) => (Play::Playing, format!("Stop the replay ({} of {})", clock(at), clock(of))),
+        };
+        if kit::icon_button(&mut right, colors, Icon::Replay(play), input.replay.is_some()).on_hover_text(tip).clicked() {
+            action = Some(HeaderAction::ToggleReplay);
         }
     }
     let tools_left = right.min_rect().left();
@@ -145,4 +181,13 @@ fn toggle(ui: &mut Ui, colors: &Colors, mode: Option<Mode>, targets: &[(Location
         kit::tip(ui.ctx(), colors, toggle.rect, &[(&targets[i].1, false)], true);
     }
     toggle.clicked().map(|i| targets[i].0)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_clock_reads_minutes_and_seconds() {
+        let clock = super::clock;
+        assert_eq!([clock(0.0), clock(59.9), clock(61.0), clock(-3.0), clock(3725.0)], ["0:00", "0:59", "1:01", "0:00", "62:05"]);
+    }
 }

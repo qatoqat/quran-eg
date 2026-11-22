@@ -5,11 +5,11 @@
 //! so the audio can be aligned to it without a model having to find the place first. Files go to
 //! `~/.local/share/quran-eg/recordings/`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use quran_core::view::Position;
+use quran_core::view::{Position, WordRef};
 
 pub struct Recorder {
     _stream: cpal::Stream,
@@ -31,6 +31,24 @@ fn loc(p: &Position) -> String {
 
 pub fn dir() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("quran-eg").join("recordings"))
+}
+
+/// The newest recording's WAV (the one written last), if there is one.
+pub fn newest() -> Option<PathBuf> {
+    newest_in(&dir()?)
+}
+
+fn newest_in(dir: &Path) -> Option<PathBuf> {
+    let wavs = std::fs::read_dir(dir).ok()?.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "wav"));
+    wavs.filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path()))).max_by_key(|(at, _)| *at).map(|(_, path)| path)
+}
+
+/// Where a recording started, as its sidecar says: the first word of the top line, and its page (0 if not said).
+pub fn started_at(wav: &Path) -> Option<(WordRef, u16)> {
+    let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(wav.with_extension("json")).ok()?).ok()?;
+    let at = WordRef::parse(json.get("start")?.as_str()?)?;
+    let page = json.get("page").and_then(serde_json::Value::as_u64).and_then(|p| u16::try_from(p).ok()).unwrap_or(0);
+    Some((at, page))
 }
 
 impl Recorder {
@@ -138,6 +156,40 @@ pub fn wav_bytes(samples: &[f32], rate: u32) -> Vec<u8> {
     out
 }
 
+/// A 16-bit PCM WAV, as `wav_bytes` writes it (more channels than one are mixed): its samples and rate.
+pub fn read_wav(bytes: &[u8]) -> Option<(Vec<i16>, u32)> {
+    if bytes.get(0..4)? != b"RIFF" || bytes.get(8..12)? != b"WAVE" {
+        return None;
+    }
+    let (mut at, mut format) = (12, None);
+    while let Some(head) = bytes.get(at..at + 8) {
+        let size = u32::from_le_bytes(head[4..8].try_into().ok()?) as usize;
+        // A data chunk cut short (a recording stopped while it was written) is read as far as it goes.
+        let body = &bytes[at + 8..(at + 8).saturating_add(size).min(bytes.len())];
+        match &head[..4] {
+            b"fmt " if body.len() >= 16 => {
+                let word = |i: usize| u16::from_le_bytes([body[i], body[i + 1]]);
+                let rate = u32::from_le_bytes(body[4..8].try_into().ok()?);
+                if word(0) != 1 || word(14) != 16 || word(2) == 0 || rate == 0 {
+                    return None;
+                }
+                format = Some((usize::from(word(2)), rate));
+            }
+            b"data" => {
+                let (channels, rate) = format?;
+                let mix = |frame: &[u8]| {
+                    let sum: i32 = frame.as_chunks::<2>().0.iter().map(|s| i32::from(i16::from_le_bytes(*s))).sum();
+                    (sum / channels as i32) as i16
+                };
+                return Some((body.chunks_exact(2 * channels).map(mix).collect(), rate));
+            }
+            _ => {}
+        }
+        at = at.checked_add(8 + size + (size & 1))?;
+    }
+    None
+}
+
 /// Seconds rounded to hundredths (in f64, so the JSON reads 12.35, not 12.350000381).
 fn cents(t: f32) -> f64 {
     (t as f64 * 100.0).round() / 100.0
@@ -169,6 +221,42 @@ mod tests {
         assert_eq!(u32::from_le_bytes(w[40..44].try_into().unwrap()), 8);
         assert_eq!(w.len(), 44 + 8);
         assert_eq!(i16::from_le_bytes(w[50..52].try_into().unwrap()), 32767, "clamped");
+    }
+
+    #[test]
+    fn a_recording_reads_back_as_it_was_written() {
+        let samples = [0.0, 0.5, -0.5, 1.0];
+        let (read, rate) = read_wav(&wav_bytes(&samples, 48000)).unwrap();
+        assert_eq!((read, rate), (vec![0, 16383, -16383, 32767], 48000));
+        // Two channels are mixed; a chunk before the data is passed over; a cut data chunk reads as far as it goes.
+        let mut stereo = wav_bytes(&[0.0; 4], 44100);
+        stereo[22] = 2;
+        stereo.splice(36..36, *b"LIST\x02\x00\x00\x00ab");
+        let n = stereo.len();
+        stereo[n - 8..].copy_from_slice(&[0x00, 0x40, 0x00, 0x20, 0x00, 0x80, 0x00, 0xc0]);
+        assert_eq!(read_wav(&stereo), Some((vec![12288, -24576], 44100)));
+        assert_eq!(read_wav(&stereo[..n - 3]), Some((vec![12288], 44100)));
+        assert_eq!(read_wav(b"RIFF\0\0\0\0WAVEdata"), None, "no format");
+        assert_eq!(read_wav(b"not a wav at all"), None);
+    }
+
+    #[test]
+    fn the_newest_recording_and_where_it_started() {
+        let dir = std::env::temp_dir().join(format!("quran-eg-recordings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(newest_in(&dir), None);
+        let (old, new) = (dir.join("recitation-1.wav"), dir.join("recitation-2.wav"));
+        std::fs::write(&old, wav_bytes(&[0.0], 16000)).unwrap();
+        std::fs::write(&new, wav_bytes(&[0.0], 16000)).unwrap();
+        std::fs::write(dir.join("recitation-3.json"), "{}").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        std::fs::File::options().write(true).open(&old).unwrap().set_modified(past).unwrap();
+        assert_eq!(newest_in(&dir), Some(new.clone()), "the WAV written last, a sidecar alone is no recording");
+        std::fs::write(new.with_extension("json"), sidecar_json("18:46:1", 299, 48000, 3.0, &[])).unwrap();
+        assert_eq!(started_at(&new), Some((WordRef { chapter: 18, verse: 46, word: 1 }, 299)));
+        assert_eq!(started_at(&old), None, "no sidecar");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

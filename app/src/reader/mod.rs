@@ -19,6 +19,7 @@ mod page_check;
 mod tests;
 mod verses;
 
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -75,12 +76,14 @@ struct Space {
 /// The sizes every page shares, for a column this wide and the widest line seen
 /// so far (at scale 1). All pages follow that line: if it doesn't fit the column,
 /// everything is scaled down together, and every page's lines are as wide as it.
+/// Memorizing, no word says what it means.
 fn metrics_for(s: &Settings, muted: egui::Color32, column: f32, widest: Option<f32>) -> Metrics {
     let fit = widest.filter(|w| *w > column).map_or(1.0, |w| column / w);
     let em = settings::mushaf_em(s.arabic_font_scale) * fit;
     let wbw = &s.word_by_word;
-    let tooltip = wbw.display == WbwDisplay::Tooltip;
-    let meanings = (wbw.show_translation || wbw.show_transliteration) && !tooltip;
+    let (translation, transliteration) = (wbw.show_translation && !s.hifz, wbw.show_transliteration && !s.hifz);
+    let tooltip = wbw.display == WbwDisplay::Tooltip && !s.hifz;
+    let meanings = (translation || transliteration) && wbw.display != WbwDisplay::Tooltip;
     let word_gap = settings::word_gap(s.word_spacing);
     Metrics {
         fit,
@@ -93,9 +96,10 @@ fn metrics_for(s: &Settings, muted: egui::Color32, column: f32, widest: Option<f
         meaning_font: settings::meaning_font_px(s.translation_font_scale) * fit,
         meaning_max_width: settings::MEANING_MAX_WIDTH * fit,
         meanings,
-        translation: wbw.show_translation,
-        transliteration: wbw.show_transliteration,
+        translation,
+        transliteration,
         tooltip,
+        memorizing: s.hifz,
         muted,
     }
 }
@@ -150,6 +154,8 @@ pub struct Reader {
     quiet: bool,
     /// The height of the view when last drawn.
     seen_height: f32,
+    /// Memorizing: the words clicked to show them.
+    revealed: HashSet<(u16, u16, u16)>,
 }
 
 impl Reader {
@@ -262,6 +268,7 @@ impl Reader {
             touched: false,
             quiet: false,
             seen_height: 0.0,
+            revealed: HashSet::new(),
         }
     }
 
@@ -381,7 +388,7 @@ impl Reader {
                     }
                     None => {
                         let mut block = Block::new(key, page.clone(), height);
-                        if env.settings.show_page_translation {
+                        if env.settings.page_translations() {
                             block.below = scroll::below_estimate(&block, env);
                             block.height += block.below;
                         }
@@ -415,7 +422,7 @@ impl Reader {
         let s = env.settings;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         (s.arabic_font_scale, s.translation_font_scale, s.word_spacing, s.mushaf_font as u8).hash(&mut hasher);
-        (s.word_by_word.show_translation, s.word_by_word.show_transliteration, s.word_by_word.display as u8).hash(&mut hasher);
+        (s.word_by_word.show_translation, s.word_by_word.show_transliteration, s.word_by_word.display as u8, s.hifz).hash(&mut hasher);
         let style = hasher.finish();
         if self.style != style {
             self.style = style;
@@ -431,7 +438,12 @@ impl Reader {
         let ctx = ui.ctx().clone();
         self.poll(&ctx, env);
         let area = ui.available_rect_before_wrap();
-        ui.allocate_rect(area, Sense::hover());
+        // Memorizing, a word is clicked to show it; the words shown are hidden again when it ends.
+        let hifz = env.settings.hifz && !self.quiet;
+        if !env.settings.hifz && !self.revealed.is_empty() {
+            self.revealed.clear();
+        }
+        let pages_area = ui.allocate_rect(area, if hifz { Sense::click() } else { Sense::hover() });
         let width = (settings::content_width_px(env.settings.content_width) as f32).min(area.width());
         let column = Rect::from_center_size(area.center(), vec2(width - 2.0 * COLUMN_PAD, area.height()));
         self.column = column.width().max(120.0);
@@ -460,6 +472,9 @@ impl Reader {
         self.top_chrome(ui, env, space, top, &mut open);
         let pages_top = top + self.top_height;
         self.paint_pages(ui, env, &metrics, space, pages_top, &mut open);
+        if hifz {
+            self.reveal(ui, &pages_area);
+        }
         self.bottom_chrome(ui, env, space, pages_top + pages, &mut open);
         if let Some(offset) = crate::kit::scroll_bar(ui, env.colors, area, self.scroll, total) {
             (self.scroll, self.touched) = (offset, true);
@@ -476,6 +491,22 @@ impl Reader {
             self.load_more(&ctx, env.client);
         }
         open
+    }
+
+    /// Memorizing: the word clicked shows, or hides again (the words on screen are this frame's).
+    fn reveal(&mut self, ui: &Ui, pages: &egui::Response) {
+        let word = |at: egui::Pos2| self.words.iter().find(|w| w.0.1 > 0 && w.1.contains(at)).map(|w| w.0);
+        if pages.hover_pos().and_then(word).is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        if pages.clicked()
+            && let Some(at) = pages.interact_pointer_pos().and_then(word)
+        {
+            if !self.revealed.remove(&at) {
+                self.revealed.insert(at);
+            }
+            ui.ctx().request_repaint();
+        }
     }
 
     fn paint_pages(
@@ -502,9 +533,10 @@ impl Reader {
             lens: env.lens,
             vivid: Default::default(),
             slots: Default::default(),
+            shown: env.settings.hifz.then_some(&self.revealed),
         };
         let left = (column.center().x - metrics.line_width / 2.0).round();
-        let translations = env.settings.show_page_translation;
+        let translations = env.settings.page_translations();
         let mut shift = 0.0;
         let mut y = pages_top;
         for i in 0..self.blocks.len() {

@@ -65,7 +65,7 @@ fn place_block(block: &mut Block, ctx: &egui::Context, env: &Env<'_>, m: &Metric
     (block.sheet.as_ref().map(|s| s.version), block.cells, settled, env.bismillah.is_some()).hash(&mut hasher);
     let stamp = hasher.finish();
     // Verse translations under the page: as measured when drawn, or a guess until then.
-    block.below = match (env.settings.show_page_translation, block.below > 0.0) {
+    block.below = match (env.settings.page_translations(), block.below > 0.0) {
         (false, _) => 0.0,
         (true, true) => block.below,
         (true, false) => below_estimate(block, env),

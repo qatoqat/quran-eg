@@ -164,6 +164,13 @@ pub struct Voice {
     /// Folder of the installed listener (`qv`, `model/`, `ref.json`, from quran-voice's
     /// `scripts/install-listener.sh`); empty = `<data dir>/quran-voice`.
     pub listener: String,
+    /// The model the listener runs: a folder of the listener's `models/`; empty = its `model/`.
+    pub model: String,
+}
+
+/// The listener's folder of the model `name` (a [`Voice::model`]): `model`, or `models/<name>`.
+pub fn model_folder(name: &str) -> String {
+    if name.is_empty() { "model".into() } else { format!("models/{name}") }
 }
 
 pub const DEFAULT_VOICE_COLOR: &str = "#ff8c00";
@@ -181,6 +188,7 @@ impl Default for Voice {
             far_wait_ms: 5000,
             stop_on_closing: true,
             listener: String::new(),
+            model: String::new(),
         }
     }
 }
@@ -415,6 +423,9 @@ pub struct Settings {
     /// The offer to save the Quran for reading offline has been answered, or saving was started: it is made once
     /// (settings of before have not seen it).
     pub offline_offered: bool,
+    /// Memorizing (hifz): the mushaf's words are hidden but for the ayahs' ends, and so are the meanings and
+    /// translations; a word clicked shows until it is clicked again.
+    pub hifz: bool,
 }
 
 impl Default for Settings {
@@ -437,6 +448,7 @@ impl Default for Settings {
             pointer: Pointer::default(),
             voice: Voice::default(),
             offline_offered: false,
+            hifz: false,
         }
     }
 }
@@ -457,6 +469,11 @@ impl Settings {
             per_page: 50,
             mushaf: Some(self.mushaf_font.mushaf_id()),
         }
+    }
+
+    /// Whether each page's verse translations show under it (not while memorizing).
+    pub fn page_translations(&self) -> bool {
+        self.show_page_translation && !self.hifz
     }
 
     /// Font base URLs to try, in order (custom first).
