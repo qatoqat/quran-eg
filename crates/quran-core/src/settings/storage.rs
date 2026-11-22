@@ -126,6 +126,14 @@ pub fn normalize(s: &mut Settings) {
     range.roundness = range.roundness.min(50);
     range.border = range.border.min(12);
     range.blur = range.blur.min(10);
+    let skipped = &mut voice.skipped;
+    skipped.color = super::sanitize_color(&skipped.color).unwrap_or_else(|| super::DEFAULT_SKIPPED_COLOR.into());
+    skipped.size = skipped.size.clamp(4, 20);
+    skipped.opacity = skipped.opacity.min(100);
+    skipped.roundness = skipped.roundness.min(50);
+    skipped.border = skipped.border.min(12);
+    skipped.blur = skipped.blur.min(10);
+    skipped.min_gap = skipped.min_gap.clamp(1, 10);
     let motion = &mut voice.motion;
     for glide in [&mut motion.pointer, &mut motion.range_start, &mut motion.range_end] {
         glide.ms = glide.ms.clamp(60, 1500);
@@ -471,6 +479,23 @@ mod tests {
         // Memorizing hides the verse translations under the pages.
         let s = Settings { show_page_translation: true, hifz: true, ..Default::default() };
         assert!(!s.page_translations() && Settings { hifz: false, ..s }.page_translations());
+    }
+
+    #[test]
+    fn skipped_words_are_marked_by_default_and_their_look_carries_over_clamped() {
+        // Settings of before: marked, in a soft red under the pointer, gaps of two words or more.
+        let s = from_json(r#"{"theme":"Dark","voice":{"range":{"opacity":32,"blur":3}}}"#).unwrap();
+        assert_eq!(s.voice.skipped, crate::settings::VoiceSkipped::default());
+        let k = &s.voice.skipped;
+        assert!(k.enabled && k.color == "#d9534f" && (k.opacity, k.min_gap) == (30, 2));
+        let mut s = Settings::default();
+        let k = &mut s.voice.skipped;
+        (k.enabled, k.color, k.size, k.opacity, k.roundness, k.border, k.blur, k.min_gap) = (false, "#123abc".into(), 20, 0, 50, 12, 10, 10);
+        assert_eq!(from_json(&to_json(&s)), Some(s));
+        let s = from_json(r#"{"voice":{"skipped":{"color":"red","size":1,"opacity":200,"roundness":99,"border":99,"blur":99,"min_gap":0}}}"#).unwrap();
+        let k = &s.voice.skipped;
+        assert_eq!((k.color.as_str(), k.size, k.opacity, k.roundness, k.border, k.blur, k.min_gap), ("#d9534f", 4, 100, 50, 12, 10, 1));
+        assert_eq!(from_json(r#"{"voice":{"skipped":{"min_gap":99}}}"#).unwrap().voice.skipped.min_gap, 10);
     }
 
     #[test]

@@ -17,6 +17,7 @@ use super::lead::{self, Lead};
 use super::link::{Heard, Loc};
 use super::presence::Heard as Heard2;
 use super::motion::{Drawn, Follower, Jump, Params, Plan, Reading};
+use super::skipped::Skipped;
 use crate::pointer::{Lens, ReadingPointer};
 use crate::reader::Slot;
 use crate::theme::Colors;
@@ -112,6 +113,8 @@ pub struct Marker {
     due: Option<f64>,
     /// The scroll the last frame asked of the reader.
     asked: f32,
+    /// The words the reading went past unread.
+    skipped: Skipped,
 }
 
 /// What a frame draws: the dot, the range's rectangles, and how opaque both are (`shade`).
@@ -143,6 +146,48 @@ impl Look {
 fn rgba(hex: &str, alpha: f32) -> Color32 {
     let [r, g, b] = parse_hex(hex).unwrap_or([255, 140, 0]);
     Color32::from_rgba_unmultiplied(r, g, b, (alpha.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
+/// How rounded rectangles over words look: the accuracy range's, or the skipped words'.
+pub struct Boxes<'a> {
+    pub color: &'a str,
+    /// Percent.
+    pub opacity: u8,
+    /// Corner radius in percent of a rectangle's height, outline width in points, edge blur 0..=10.
+    pub roundness: u8,
+    pub border: u8,
+    pub blur: u8,
+}
+
+impl<'a> From<&'a quran_core::settings::VoiceRange> for Boxes<'a> {
+    fn from(r: &'a quran_core::settings::VoiceRange) -> Self {
+        Boxes { color: &r.color, opacity: r.opacity, roundness: r.roundness, border: r.border, blur: r.blur }
+    }
+}
+
+impl<'a> From<&'a quran_core::settings::VoiceSkipped> for Boxes<'a> {
+    fn from(s: &'a quran_core::settings::VoiceSkipped) -> Self {
+        Boxes { color: &s.color, opacity: s.opacity, roundness: s.roundness, border: s.border, blur: s.blur }
+    }
+}
+
+/// Draws `rects` as the range is drawn, at `shade` of the look's opacity: filled, outlined (a point of it worth `scale`;
+/// an outline stays an outline: at most a third of the height, the fill keeps the rest), the edges blurred (10 softens
+/// over half the height: epaint's feathering, as for shadows).
+pub fn paint_boxes(painter: &egui::Painter, rects: &[Rect], look: Boxes, shade: f32, scale: f32) {
+    let opacity = f32::from(look.opacity) / 100.0;
+    for &rect in rects {
+        let height = rect.height();
+        let radius = CornerRadius::same((height * f32::from(look.roundness) / 100.0).round().min(255.0) as u8);
+        let outline = Stroke::new((f32::from(look.border) * scale).min(height / 3.0), rgba(look.color, (opacity * 2.5 + 0.25).min(1.0) * shade));
+        let soft = height * f32::from(look.blur) * 0.05;
+        painter.add(RectShape::filled(rect, radius, rgba(look.color, opacity * shade)).with_blur_width(soft));
+        if outline.width > 0.0 {
+            // Blurred no wider than itself, it keeps its width at any edge blur: with the fill's blur a thin outline would
+            // spread faintly over all of it, beyond the words.
+            painter.add(RectShape::stroke(rect, radius, outline, StrokeKind::Inside).with_blur_width(soft.min(outline.width)));
+        }
+    }
 }
 
 fn reading(state: &str) -> Option<Reading> {
@@ -278,6 +323,12 @@ impl Marker {
         }
         let on = self.seen.and_then(|loc| words.binary_search_by(|(l, ..)| l.cmp(&loc)).ok());
         self.keep.reader_moved(words, on);
+        self.skipped.moved(words);
+    }
+
+    /// The words the reading went past unread.
+    pub fn skipped(&mut self) -> &mut Skipped {
+        &mut self.skipped
     }
 
     /// The reader chose in the toast: to go to the far place now, or to stay.
@@ -316,6 +367,8 @@ impl Marker {
             // A jump ahead, held: the pointer stays, and the place it shows stays the one heard before.
             return None;
         }
+        // (A jump the hold lets go arrived where it was first heard; the pace is the one the reading had come at.)
+        let (held, pace) = (self.hold.confirmed(), self.follower.pace());
         if !matches!(reading(&h.state), Some(Reading::Locked | Reading::Drifting | Reading::Paused)) {
             // Searching, or unsure: no longer followed well where it was.
             self.pages.lost();
@@ -337,6 +390,9 @@ impl Marker {
                 Some(jump)
             }
         };
+        if let Some(r) = reading(&h.state) {
+            self.skipped.heard(&h, r, held, pace, params.skipped, now);
+        }
         self.last = Some(h);
         self.news();
         jump
@@ -445,6 +501,16 @@ impl Marker {
         // (At rest, unless something drawn is found on its way below.)
         (self.ticked, self.news, self.due) = (Some((now, false)), false, None);
         self.lead.view(words, area, ctx.input(|i| i.pointer.hover_pos()));
+        // The words gone past unread, under the range (painted first on its layer) wherever the pointer is; they change
+        // only with news, and ask for no frames.
+        let lift = f32::from(settings.lift) / 10.0;
+        if !settings.skipped.enabled {
+            self.skipped.clear();
+        } else if !self.skipped.is_empty() {
+            let rects = self.skipped.rects(words, lift, settings.skipped.size);
+            let painter = ctx.layer_painter(stage.layers.0).with_clip_rect(area);
+            paint_boxes(&painter, &rects, Boxes::from(&settings.skipped), 1.0 - self.out, stage.scale);
+        }
         let params = Params::of(settings);
         let far_wait = f64::from(settings.far_wait_ms) / 1000.0;
         let mut shown = Shown { offer: self.pages.offer(now, far_wait).filter(|_| settings.auto_scroll), ..Shown::default() };
@@ -464,7 +530,6 @@ impl Marker {
         let (Some(anchor), Some(drawn)) = (self.last.clone(), self.follower.tick(now, dt, &params)) else { return shown };
         let state = reading(&anchor.state);
         let sure = state == Some(Reading::Locked) && anchor.conf > 0.8;
-        let lift = f32::from(settings.lift) / 10.0;
         let place = |c: f32| lead::point(c, &anchor, words, lift);
         let Some((at, i)) = place(drawn.x) else {
             // Not on screen: the reader goes there after a second, or, far from where the recitation
@@ -532,23 +597,8 @@ impl Marker {
         };
         let seen = Look { at, rects: look(drawn, shade).map_or_else(Vec::new, |l| l.rects), shade };
         if r.enabled {
-            let height = size(i).0;
-            let opacity = f32::from(r.opacity) / 100.0;
-            let radius = CornerRadius::same((height * f32::from(r.roundness) / 100.0).round().min(255.0) as u8);
-            // An outline stays an outline: at most a third of the height, the fill keeps the rest.
-            let border = f32::from(r.border) * stage.scale;
-            let outline = Stroke::new(border.min(height / 3.0), rgba(&r.color, (opacity * 2.5 + 0.25).min(1.0) * shade));
-            // Edge blur 10 softens it over half its height (epaint's feathering, as for shadows).
-            let soft = height * f32::from(r.blur) * 0.05;
             let painter = ctx.layer_painter(stage.layers.0).with_clip_rect(area);
-            for &rect in &seen.rects {
-                painter.add(RectShape::filled(rect, radius, rgba(&r.color, opacity * shade)).with_blur_width(soft));
-                if outline.width > 0.0 {
-                    // Blurred no wider than itself, it keeps its width at any edge blur: with the fill's
-                    // blur a thin outline would spread faintly over all of it, beyond the words.
-                    painter.add(RectShape::stroke(rect, radius, outline, StrokeKind::Inside).with_blur_width(soft.min(outline.width)));
-                }
-            }
+            paint_boxes(&painter, &seen.rects, Boxes::from(r), shade, stage.scale);
         }
         let mut smudging = false;
         if settings.pointer.enabled {

@@ -540,6 +540,25 @@ fn voice(ui: &mut Ui, colors: &Colors, settings: &mut Settings, (listener, joine
         range(ui, "Edge blur", &mut r.blur, 0..=10, 1, "");
     }
     ui.add_space(8.0);
+    small_caps(ui, colors, "Skipped words");
+    let k = &mut voice.skipped;
+    check(ui, &mut k.enabled, "Mark words and ayahs read past (reading them takes the mark away)");
+    if k.enabled {
+        color(ui, &mut k.color, "Colour");
+        range(ui, "Height (tenths of a line's height)", &mut k.size, 4..=20, 1, "");
+        range(ui, "Opacity", &mut k.opacity, 0..=100, 2, "%");
+        range(ui, "Roundness", &mut k.roundness, 0..=50, 5, "%");
+        range(ui, "Outline", &mut k.border, 0..=12, 1, " pt");
+        range(ui, "Edge blur", &mut k.blur, 0..=10, 1, "");
+        range(ui, "Fewest words that count as skipped", &mut k.min_gap, 1..=10, 1, "");
+        help(
+            ui,
+            colors,
+            "A move on past words you could not have read in the time is a skip; the listener catching up after lagging a \
+             word or two is not. A toast offers to go back to them, or to dismiss the marks.",
+        );
+    }
+    ui.add_space(8.0);
     small_caps(ui, colors, "Motion");
     let m = &mut voice.motion;
     if !voice.tuned {

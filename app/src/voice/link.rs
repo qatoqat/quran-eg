@@ -298,6 +298,17 @@ impl Link {
     }
 }
 
+#[cfg(test)]
+impl Link {
+    /// A link to no listener: what is sent on the sender comes as its news.
+    pub fn fake() -> (Link, Sender<Event>) {
+        let (events_tx, events) = channel();
+        let ((visible, _), (want, _)) = (channel(), channel());
+        let link = Link { child: None, joined: true, events, visible, want, stop: Arc::new(AtomicBool::new(false)), log: None };
+        (link, events_tx)
+    }
+}
+
 impl Drop for Link {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);

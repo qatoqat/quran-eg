@@ -79,6 +79,8 @@ pub struct Params {
     pub tuned: bool,
     /// Scroll continuously, the line read kept a third of the way down (`keep`; experimental).
     pub continuous: bool,
+    /// Words gone past unread are marked (`skipped`) when at least this many; `None`: not marked.
+    pub skipped: Option<u32>,
 }
 
 /// Tuned movement's glides and run-on, from the user's recitations as the listener heard them: a report every 0.32 s, a
@@ -118,6 +120,7 @@ impl Params {
             line_stop: m.stop_at_line_end,
             tuned: v.tuned,
             continuous: m.continuous_scroll,
+            skipped: v.skipped.enabled.then_some(u32::from(v.skipped.min_gap.max(1))),
         };
         if v.tuned {
             let (glide, behind, ahead, wait) = TUNED;

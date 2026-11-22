@@ -10,8 +10,9 @@
 //! the settings `script`, a recitation of a few lines with a listener of its own, which `player` plays
 //! through the same marker (`dock` draws the rest), so their changes can be seen at work.
 //! `installed` tells there which listener is installed and which models it can run. Tuned movement: `hold` keeps a jump
-//! ahead back until the reading goes on there; `keep` keeps the line being read in view; `toast` says where the reader
-//! is about to be taken, and, with `weak`, when the microphone hears them too faintly. `replay` plays the newest
+//! ahead back until the reading goes on there; `keep` keeps the line being read in view; `skipped` marks the words the
+//! reading went past unread until they are read; `toast` says where the reader is about to be taken, which words they
+//! skipped, and, with `weak`, when the microphone hears them too faintly. `replay` plays the newest
 //! recording through `sound` while a listener of its own hears it, so the pointer follows it as it does the reader.
 
 mod dock;
@@ -30,6 +31,7 @@ mod presence;
 mod preview;
 mod replay;
 mod script;
+mod skipped;
 mod sound;
 mod toast;
 mod visible;
@@ -316,13 +318,19 @@ impl Voice {
                 Event::Voice { heard, range, loud } => {
                     self.offers.voice = true;
                     self.weak.voice(heard.present, range, now);
+                    // (Silences tell a skip from reading on, whatever the pointer's settings.)
+                    self.marker.skipped().voice(heard.quiet, now);
                     if wants(settings).voice {
                         self.marker.voice(heard, loud, now);
                     }
                     self.voice_range = range;
                 }
                 Event::Audio(a) => self.meter.hear(a, now),
-                Event::Failed(e) => self.status = Status::Failed(e),
+                Event::Failed(e) => {
+                    // Listening stopped: the words skipped go with it.
+                    self.marker.skipped().clear();
+                    self.status = Status::Failed(e);
+                }
             }
         }
         // Plans for settings that use them, and the voice level; asked again of a listener joined anew.
@@ -374,16 +382,25 @@ impl Voice {
         let mut steer = shown.steer;
         // (A replay's is the recording's microphone, which nobody can move closer now.)
         let weak = self.status == Status::Listening && !self.replay && self.weak.tick(now);
-        let note = shown.offer.map(Note::of).or(weak.then_some(Note::Weak));
+        let skipped = self.marker.skipped().summary().filter(|_| settings.skipped.enabled);
+        let note = Note::first(shown.offer, skipped, weak);
         let toast = note.as_ref().map(|note| Toast::new(ctx, note, chapters, colors, area.width() - 24.0, 1.0));
         let height = toast.as_ref().map_or(0.0, Toast::height);
         if let (Some(y), Some(toast)) = (self.toast.top(note.as_ref(), area, self.line, height), toast) {
+            let skips = matches!(note, Some(Note::Skipped(_)));
             match toast.show(ctx, egui::Id::unique("voice-toast"), area, y, colors) {
                 Some(Click::Go) => steer.go_to = steer.go_to.or(self.marker.choose(true)),
                 Some(Click::Stay) => steer.go_to = steer.go_to.or(self.marker.choose(false)),
+                // To a little before the first words skipped, as the pointer's moves go (a fade, a page turned).
+                Some(Click::Back) => steer.go_to = steer.go_to.or(self.marker.skipped().back_to()),
+                Some(Click::Dismiss) if skips => {
+                    self.marker.skipped().clear();
+                    ctx.request_repaint();
+                }
                 Some(Click::Dismiss) => self.weak.dismiss(),
-                // The countdown moves on.
-                None => ctx.request_repaint_after_secs(0.25),
+                // The countdown moves on (the skipped words' toast changes only with news).
+                None if !skips => ctx.request_repaint_after_secs(0.25),
+                None => {}
             }
         }
         if let Some(to) = steer.go_to {
@@ -397,5 +414,49 @@ impl Voice {
         }
         steer.closed = std::mem::take(&mut self.closed);
         steer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_listeners_news_marks_the_words_skipped_and_they_go_when_listening_stops() {
+        let (link, news) = Link::fake();
+        let mut voice = Voice::with(link, "", false);
+        let (ctx, settings) = (egui::Context::default(), Settings::default());
+        let poll = |voice: &mut Voice, now: f64| {
+            let mut output = ctx.run_pass(egui::RawInput { time: Some(now), ..Default::default() }, |ctx| voice.poll(ctx, &settings));
+            output.textures_delta.clear();
+        };
+        let say = |loc: Loc, word: u32, letter: u16, state: &str| {
+            Event::Heard(link::Heard { loc, word, letter, letters: 4, state: state.into(), conf: 0.97, speed: 8.2, t: 0.0, slid: None, alts: Vec::new(), plan: None })
+        };
+        news.send(Event::Connected).unwrap();
+        // 68:44's last words, a stop the listener reports, and on two seconds later with 68:46 (held, then followed):
+        // 68:45 left out.
+        let reports = [
+            (0.32, say((68, 44, 8), 73_030, 0, "Locked")),
+            (0.64, say((68, 44, 8), 73_030, 2, "Locked")),
+            (0.96, say((68, 44, 9), 73_031, 0, "Locked")),
+            (1.28, say((68, 44, 9), 73_031, 2, "Locked")),
+            (1.6, say((68, 44, 10), 73_032, 0, "Locked")),
+            (1.92, say((68, 44, 10), 73_032, 2, "Locked")),
+            (2.24, say((68, 44, 10), 73_032, 3, "Paused")),
+            (4.56, say((68, 46, 1), 73_038, 0, "Locked")),
+            (4.88, say((68, 46, 1), 73_038, 2, "Locked")),
+            (5.2, say((68, 46, 2), 73_039, 0, "Locked")),
+        ];
+        for (now, report) in reports {
+            news.send(report).unwrap();
+            poll(&mut voice, now);
+        }
+        let skipped = voice.marker.skipped().summary();
+        assert_eq!(skipped, Some(skipped::Summary { from: (68, 45, 1), to: (68, 45, 5), words: 5, others: 0 }));
+        // The listener stopped: the marks go with it.
+        news.send(Event::Failed("gone".into())).unwrap();
+        poll(&mut voice, 5.5);
+        assert!(matches!(voice.status(), Status::Failed(_)) && voice.marker.skipped().is_empty());
     }
 }

@@ -189,7 +189,7 @@ impl Preview {
             match toast.show(ui.ctx(), egui::Id::unique("voice-preview-toast"), canvas, canvas.top() + 4.0, colors) {
                 Some(Click::Go) => self.player.choose(true),
                 Some(Click::Stay) => self.player.choose(false),
-                Some(Click::Dismiss) | None => {}
+                Some(Click::Back | Click::Dismiss) | None => {}
             }
         }
         if self.player.turned().is_some() {

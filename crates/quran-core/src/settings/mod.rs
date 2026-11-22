@@ -149,6 +149,7 @@ pub struct Voice {
     /// fa), 0..=10.
     pub lift: u8,
     pub range: VoiceRange,
+    pub skipped: VoiceSkipped,
     pub motion: VoiceMotion,
     /// Keep the line being read in view.
     pub auto_scroll: bool,
@@ -182,6 +183,7 @@ impl Default for Voice {
             ring: 10,
             lift: 2,
             range: VoiceRange::default(),
+            skipped: VoiceSkipped::default(),
             motion: VoiceMotion::default(),
             auto_scroll: true,
             tuned: true,
@@ -217,6 +219,37 @@ pub struct VoiceRange {
 impl Default for VoiceRange {
     fn default() -> Self {
         Self { enabled: true, color: DEFAULT_VOICE_COLOR.into(), size: 8, spread: 10, opacity: 10, roundness: 35, border: 0, blur: 0 }
+    }
+}
+
+/// Words the reading went past unread (words or whole ayahs skipped), marked until they are read: rounded rectangles
+/// over them in the accuracy range's shapes, under the pointer.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VoiceSkipped {
+    pub enabled: bool,
+    /// `#rrggbb`.
+    pub color: String,
+    /// Height in tenths of a line's height, 4..=20.
+    pub size: u8,
+    /// Percent, 0..=100.
+    pub opacity: u8,
+    /// Corner radius in percent of its height, 0..=50 (50 = pill).
+    pub roundness: u8,
+    /// Outline width in points, 0..=12.
+    pub border: u8,
+    /// Softness of its edge, 0..=10.
+    pub blur: u8,
+    /// The fewest words gone past unread that count as skipped, 1..=10 (the listener reports about every 0.32 s: at a
+    /// fast pace a word read can go unreported).
+    pub min_gap: u8,
+}
+
+pub const DEFAULT_SKIPPED_COLOR: &str = "#d9534f";
+
+impl Default for VoiceSkipped {
+    fn default() -> Self {
+        Self { enabled: true, color: DEFAULT_SKIPPED_COLOR.into(), size: 8, opacity: 30, roundness: 35, border: 0, blur: 0, min_gap: 2 }
     }
 }
 

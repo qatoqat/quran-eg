@@ -8,7 +8,7 @@
 /// Words ahead of the pointer's place beyond which a report is a jump.
 const JUMP: f32 = 3.0;
 /// Words ahead up to which a jump is held (about a page; further off is a far place).
-const PAGE: f32 = 150.0;
+pub const PAGE: f32 = 150.0;
 /// Reports going on from a held jump, or one and this long, that confirm it.
 const CONFIRM: u8 = 2;
 const CONFIRM_SECS: f64 = 1.5;
@@ -17,30 +17,40 @@ const ON: f32 = 4.0;
 
 #[derive(Debug, Default)]
 pub struct Hold {
-    /// The jump held: its latest place, when it was first heard, and the reports since that went on from it.
-    held: Option<(f32, f64, u8)>,
+    /// The jump held: where it was first heard, its latest place, when it was first heard, and the reports since that
+    /// went on from it.
+    held: Option<(f32, f32, f64, u8)>,
+    /// Where and when the jump the last report confirmed was first heard.
+    confirmed: Option<(f32, f64)>,
 }
 
 impl Hold {
     /// Whether to follow a report of position `c` at clock time `now`, the pointer going to `at` (`None`: it does not
     /// show, and nothing is held).
     pub fn take(&mut self, c: f32, at: Option<f32>, now: f64) -> bool {
+        self.confirmed = None;
         if !at.is_some_and(|at| c > at + JUMP && c <= at + PAGE) {
             self.held = None;
             return true;
         }
         match self.held {
-            Some((was, since, n)) if c >= was - 0.5 && c <= was + ON => {
+            Some((first, was, since, n)) if c >= was - 0.5 && c <= was + ON => {
                 let n = if c > was + 0.25 { n + 1 } else { n };
                 if n >= CONFIRM || (n > 0 && now - since >= CONFIRM_SECS) {
                     self.held = None;
+                    self.confirmed = Some((first, since));
                     return true;
                 }
-                self.held = Some((c.max(was), since, n));
+                self.held = Some((first, c.max(was), since, n));
             }
-            _ => self.held = Some((c, now, 0)),
+            _ => self.held = Some((c, c, now, 0)),
         }
         false
+    }
+
+    /// Where and when the jump the last report taken confirmed was first heard (the reading arrived there then), once.
+    pub fn confirmed(&mut self) -> Option<(f32, f64)> {
+        self.confirmed.take()
     }
 }
 
@@ -90,6 +100,11 @@ mod tests {
         let (mut hold, mut at) = (Hold::default(), 200.3);
         let followed = reports(&mut hold, &mut at, &[223.4, 224.0, 224.6, 225.3], 0.0);
         assert_eq!(followed, [false, false, true, true], "two reports going on: 0.64 s");
+        // The reading arrived where the jump was first heard, and when (said once, for the report that confirmed it).
+        let (mut hold, mut at) = (Hold::default(), 200.3);
+        reports(&mut hold, &mut at, &[223.4, 224.0], 5.0);
+        assert!(hold.take(224.6, Some(at), 5.64) && hold.confirmed() == Some((223.4, 5.0)));
+        assert!(hold.take(225.3, Some(224.6), 5.96) && hold.confirmed().is_none());
         // One report on, then a long word: followed once 1.5 s have passed.
         let (mut hold, mut at) = (Hold::default(), 300.1);
         let followed = reports(&mut hold, &mut at, &[308.2, 308.8, 308.8, 308.8, 308.8, 308.8], 0.0);

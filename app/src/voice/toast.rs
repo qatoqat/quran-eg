@@ -1,6 +1,7 @@
 //! The voice pointer's toast, in the header's look (its colours, border and type): where it is about to take the
 //! reader (a far place, counted down, with Go now and Stay), a warning for a place that sounds like the ayah being read
-//! (it waits for Go there or Stay), or a note that the microphone hears the voice only faintly (Dismiss). One line with
+//! (it waits for Go there or Stay), the words the reading went past unread (Go back to them, or Dismiss the marks), or a
+//! note that the microphone hears the voice only faintly (Dismiss). One line with
 //! its buttons at the end, in a capsule like the header's Surah | Juz | Page: the one that stands for doing nothing is
 //! filled. It sits a little below the line being read, where the eyes are (three quarters of the way down while that
 //! line is not known), and stays put: it never slides with the page, and moves only when the line being read comes
@@ -11,9 +12,11 @@ use std::sync::Arc;
 use egui::{Color32, CornerRadius, FontId, Galley, Id, LayerId, Order, Rect, Sense, Stroke, StrokeKind, UiBuilder, Vec2, pos2, vec2};
 use quran_core::api::Chapter;
 use quran_core::lists::find_chapter;
+use quran_core::reference::words_in;
 
 use super::follow::Offer;
 use super::link::Loc;
+use super::skipped::Summary;
 use crate::kit::Capsule;
 use crate::theme::Colors;
 
@@ -24,6 +27,8 @@ pub enum Note {
     Moving(Loc, f32),
     /// A far place that sounds like the ayah being read.
     Alike(Loc),
+    /// Words the reading went past unread (the first run of them).
+    Skipped(Summary),
     /// The voice stands only a little over the room's sound.
     Weak,
 }
@@ -37,8 +42,14 @@ impl Note {
     fn about(&self) -> (Option<Loc>, bool) {
         match *self {
             Note::Moving(to, _) | Note::Alike(to) => (Some(to), false),
+            Note::Skipped(s) => (Some(s.from), false),
             Note::Weak => (None, true),
         }
+    }
+
+    /// The one toast shown: a far place's before the words gone past unread, those before the faint microphone.
+    pub fn first(offer: Option<Offer>, skipped: Option<Summary>, weak: bool) -> Option<Note> {
+        offer.map(Note::of).or(skipped.map(Note::Skipped)).or(weak.then_some(Note::Weak))
     }
 }
 
@@ -47,12 +58,34 @@ impl Note {
 pub enum Click {
     Go,
     Stay,
+    /// To the words gone past unread.
+    Back,
     Dismiss,
 }
 
 /// The ayah, after its surah's name where the lists give it.
 fn place(chapters: &[Chapter], (s, a, _): Loc) -> String {
     find_chapter(chapters, s).map_or_else(|| format!("{s}:{a}"), |c| format!("{} {s}:{a}", c.name_simple))
+}
+
+/// The words gone past unread: an ayah or ayahs whole (`Al-Qalam 68:44`, `Al-Qalam 68:44–45`), else so many words in
+/// them, and how many places more.
+fn skipped(chapters: &[Chapter], s: &Summary) -> String {
+    let whole = s.from.2 == 1 && words_in(s.to.0, s.to.1).is_some_and(|n| n == usize::from(s.to.2));
+    let ayahs = match (s.from, s.to) {
+        (a, b) if (a.0, a.1) == (b.0, b.1) => place(chapters, a),
+        (a, b) if a.0 == b.0 => format!("{}–{}", place(chapters, a), b.1),
+        (a, b) => format!("{} – {}:{}", place(chapters, a), b.0, b.1),
+    };
+    let what = match (whole, s.words) {
+        (true, _) => ayahs,
+        (false, 1) => format!("a word in {ayahs}"),
+        (false, n) => format!("{n} words in {ayahs}"),
+    };
+    match s.others {
+        0 => format!("Skipped {what}"),
+        n => format!("Skipped {what} · {n} more"),
+    }
 }
 
 /// The toast's line, its buttons and what each does, and the one that stands for doing nothing.
@@ -63,6 +96,7 @@ pub fn text(note: &Note, chapters: &[Chapter]) -> (String, &'static [(&'static s
             (format!("Moving to {} {when}", place(chapters, to)), &[("Go now", Click::Go), ("Stay", Click::Stay)], Some(0))
         }
         Note::Alike(to) => (format!("Sounds like {}", place(chapters, to)), &[("Go there", Click::Go), ("Stay", Click::Stay)], Some(1)),
+        Note::Skipped(ref s) => (skipped(chapters, s), &[("Go back", Click::Back), ("Dismiss", Click::Dismiss)], None),
         Note::Weak => ("Mic is faint: hold it closer".into(), &[("Dismiss", Click::Dismiss)], None),
     }
 }
@@ -181,6 +215,25 @@ mod tests {
         assert_eq!((line.as_str(), buttons, on), ("Sounds like 62:7", &[("Go there", Click::Go), ("Stay", Click::Stay)][..], Some(1)));
         let (line, buttons, on) = text(&Note::Weak, &[]);
         assert_eq!((line.as_str(), buttons, on), ("Mic is faint: hold it closer", &[("Dismiss", Click::Dismiss)][..], None));
+    }
+
+    #[test]
+    fn the_skipped_words_toast_names_them_and_offers_to_go_back_or_dismiss() {
+        let note = |from, to, words, others| Note::Skipped(Summary { from, to, words, others });
+        // 68:45 has 5 words, 68:44 10.
+        let (line, buttons, on) = text(&note((68, 45, 1), (68, 45, 5), 5, 0), &[]);
+        assert_eq!((line.as_str(), buttons, on), ("Skipped 68:45", &[("Go back", Click::Back), ("Dismiss", Click::Dismiss)][..], None));
+        assert_eq!(text(&note((68, 44, 4), (68, 44, 6), 3, 0), &[]).0, "Skipped 3 words in 68:44");
+        assert_eq!(text(&note((68, 44, 9), (68, 44, 9), 1, 2), &[]).0, "Skipped a word in 68:44 · 2 more");
+        assert_eq!(text(&note((68, 44, 1), (68, 45, 5), 15, 0), &[]).0, "Skipped 68:44–45");
+        assert_eq!(text(&note((68, 44, 3), (68, 45, 5), 13, 0), &[]).0, "Skipped 13 words in 68:44–45");
+        assert_eq!(text(&note((68, 52, 1), (69, 1, 1), 6, 0), &[]).0, "Skipped 68:52 – 69:1");
+        // The far place's toast and the look-alike's come first, the faint microphone's after.
+        let offer = Offer { to: (2, 95, 1), left: Some(3.0) };
+        let summary = Summary { from: (68, 45, 1), to: (68, 45, 5), words: 5, others: 0 };
+        assert_eq!(Note::first(Some(offer), Some(summary), true), Some(Note::of(offer)));
+        assert_eq!(Note::first(None, Some(summary), true), Some(Note::Skipped(summary)));
+        assert_eq!((Note::first(None, None, true), Note::first(None, None, false)), (Some(Note::Weak), None));
     }
 
     #[test]
